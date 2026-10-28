@@ -1,0 +1,89 @@
+#!/usr/bin/python3
+# GNSS test: start a QMI LOC session on the modem (QRTR node 0) and print NMEA
+# and satellite counts for N seconds.
+import sys
+import gi
+gi.require_version("Qmi", "1.0")
+gi.require_version("Qrtr", "1.0")
+from gi.repository import GLib, Gio, Qmi, Qrtr
+
+SECS = int(sys.argv[1]) if len(sys.argv) > 1 else 60
+loop = GLib.MainLoop()
+state = {}
+
+
+def fail(msg, e):
+    print(msg, e, flush=True)
+    loop.quit()
+
+
+def on_nmea(client, out):
+    r = out.get_nmea_string()
+    s = r[1] if isinstance(r, tuple) else r
+    if s:
+        print(s.strip(), flush=True)
+
+
+def on_started(client, res):
+    try:
+        client.start_finish(res).get_result()
+    except GLib.Error as e:
+        return fail("start:", e)
+    print("LOC session started", flush=True)
+
+
+def on_registered(client, res):
+    try:
+        client.register_events_finish(res).get_result()
+    except GLib.Error as e:
+        return fail("register:", e)
+    inp = Qmi.MessageLocStartInput.new()
+    inp.set_session_id(1)
+    inp.set_intermediate_report_state(Qmi.LocIntermediateReportState.ENABLE)
+    inp.set_minimum_interval_between_position_reports(1000)
+    inp.set_fix_recurrence_type(Qmi.LocFixRecurrenceType.PERIODIC_FIXES)
+    client.start(inp, 10, None, on_started)
+
+
+def on_client(dev, res):
+    try:
+        client = dev.allocate_client_finish(res)
+    except GLib.Error as e:
+        return fail("allocate:", e)
+    state["client"] = client
+    client.connect("nmea", on_nmea)
+    inp = Qmi.MessageLocRegisterEventsInput.new()
+    inp.set_event_registration_mask(Qmi.LocEventRegistrationFlag.NMEA |
+                                    Qmi.LocEventRegistrationFlag.POSITION_REPORT |
+                                    Qmi.LocEventRegistrationFlag.GNSS_SATELLITE_INFO)
+    client.register_events(inp, 10, None, on_registered)
+
+
+def on_open(dev, res):
+    try:
+        dev.open_finish(res)
+    except GLib.Error as e:
+        return fail("open:", e)
+    dev.allocate_client(Qmi.Service.LOC, Qmi.CID_NONE, 10, None, on_client)
+
+
+def on_device(obj, res):
+    try:
+        dev = Qmi.Device.new_from_node_finish(res)
+    except GLib.Error as e:
+        return fail("device:", e)
+    state["dev"] = dev
+    dev.open(Qmi.DeviceOpenFlags.AUTO | Qmi.DeviceOpenFlags.EXPECT_INDICATIONS, 10, None, on_open)
+
+
+def on_bus(obj, res):
+    bus = Qrtr.Bus.new_finish(res)
+    node = bus.peek_node(0)
+    if not node:
+        return fail("no QRTR node 0", "")
+    Qmi.Device.new_from_node(node, None, on_device)
+
+
+Qrtr.Bus.new(1000, None, on_bus)
+GLib.timeout_add_seconds(SECS, loop.quit)
+loop.run()

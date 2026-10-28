@@ -1,0 +1,51 @@
+#!/usr/bin/python3
+# USB OTG for the Galaxy Tab S5e, until the S2MM005 Type-C/PD controller has a
+# kernel driver: polls its FUNC_STATE (0x0020, layout from Samsung's
+# include/linux/ccic/s2mm005.h) and, when it reports an attached device with
+# the tablet as DFP (an OTG adapter or hub), switches the dwc3 role to host
+# and turns the SM5705 boost on for VBUS (gts4lv-usb-mode). Back to device
+# when it is unplugged.
+import fcntl, glob, os, subprocess, time
+
+I2C_SLAVE_FORCE, I2C_RDWR = 0x0706, 0x0707
+ADDR = 0x33
+
+
+def bus_of(name):
+    for d in glob.glob("/sys/bus/i2c/devices/i2c-*"):
+        if open(d + "/name").read().strip() == name:
+            return "/dev/" + os.path.basename(d)
+    raise SystemExit(f"no {name} bus")
+
+
+fd = os.open(bus_of("i2c-usbpd"), os.O_RDWR)
+fcntl.ioctl(fd, I2C_SLAVE_FORCE, ADDR)
+
+
+def func_state():
+    os.write(fd, bytes((0x00, 0x20)))	# 16-bit register address, then read
+    b = os.read(fd, 4)
+    return {"attached": b[3] & 1, "source": (b[3] >> 1) & 1, "dfp": (b[3] >> 2) & 1}
+
+
+def role():
+    try:
+        return open(glob.glob("/sys/class/usb_role/*/role")[0]).read().strip()
+    except (IndexError, OSError):
+        return None
+
+
+want_prev = None
+while True:
+    try:
+        s = func_state()
+    except OSError:
+        time.sleep(2)
+        continue
+    want = "host" if s["attached"] and s["dfp"] else "device"
+    if want != want_prev:
+        print(f"S2MM005 {s} -> {want}", flush=True)
+        want_prev = want
+    if role() and role() != want:
+        subprocess.run(["gts4lv-usb-mode", want])
+    time.sleep(1)

@@ -1,0 +1,59 @@
+--- /usr/src/neo/iio-sensor-proxy.c.gts4lv2	2026-10-27 19:16:55.418315997 +0100
++++ src/iio-sensor-proxy.c	2026-10-27 19:17:44.963376627 +0100
+@@ -16,6 +16,7 @@
+ #include <string.h>
+ #include <stdlib.h>
+ #include <stdio.h>
++#include <math.h>
+ 
+ #include <glib-unix.h>
+ #include <gio/gio.h>
+@@ -58,6 +59,8 @@
+ 
+ 	/* Light */
+ 	gdouble previous_level;
++	gdouble smoothed_level;
++	gint64 smoothed_time;
+ 	gboolean uses_lux;
+ 
+ 	/* Compass */
+@@ -913,16 +916,36 @@
+ 	SensorData *data = user_data;
+ 	LightReadings *readings = (LightReadings *) readings_data;
+ 
++	gdouble level;
++	gint64 now;
++
+ 	//FIXME handle errors
+ 	g_debug ("Light level sent by driver (quirk applied): %lf (unit: %s)",
+ 		 readings->level, data->uses_lux ? "lux" : "vendor");
+ 
+-	if (data->previous_level != readings->level ||
+-	    data->uses_lux != readings->uses_lux) {
++	/* A light sensor that streams (SSC, ~13 Hz) jitters, and every new value
++	 * moved the screen brightness. As Android does: average over ~3 s, and only
++	 * report a level 15 % brighter or 25 % darker than the last one (and at
++	 * least 1 unit away), so the screen changes rarely and slowly. */
++	now = g_get_monotonic_time ();
++	if (data->smoothed_time == 0 || data->uses_lux != readings->uses_lux) {
++		data->smoothed_level = readings->level;
++	} else {
++		gdouble dt = (now - data->smoothed_time) / (gdouble) G_USEC_PER_SEC;
++		gdouble alpha = 1.0 - exp (-dt / 3.0);
++		data->smoothed_level += alpha * (readings->level - data->smoothed_level);
++	}
++	data->smoothed_time = now;
++	level = round (data->smoothed_level);
++
++	if (data->uses_lux != readings->uses_lux ||
++	    (data->previous_level != level &&
++	     fabs (level - data->previous_level) >= 1.0 &&
++	     (level > data->previous_level * 1.15 || level < data->previous_level * 0.75))) {
+ 		gdouble tmp;
+ 
+ 		tmp = data->previous_level;
+-		data->previous_level = readings->level;
++		data->previous_level = level;
+ 
+ 		data->uses_lux = readings->uses_lux;
+ 

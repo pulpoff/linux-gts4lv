@@ -1,0 +1,13 @@
+#!/bin/sh
+# Keep Debian the default system. The Samsung bootloader starts the recovery partition (Debian)
+# only while the bootloader message in "misc" asks for it ("boot-recovery" in the 32-byte command
+# field); otherwise it starts the boot partition (LineageOS), which clears that field when it boots.
+# Restore it at every Debian boot and shutdown, and only when it differs: one 32-byte write.
+# Holding the buttons, or LineageOS's "Restart -> Recovery", still chooses explicitly.
+# Not on the way to Android: gts4lv-boot-android cleared the message on purpose.
+[ -e /run/gts4lv-boot-android ] && { echo "restarting into Android: misc left alone"; exit 0; }
+M=${1:-/dev/disk/by-partlabel/misc}
+want=boot-recovery
+[ "$(head -c 32 "$M" | tr -d '\000')" = "$want" ] && exit 0
+{ printf %s "$want"; head -c $((32 - ${#want})) /dev/zero; } | dd of="$M" bs=32 count=1 conv=notrunc,fsync status=none
+echo "bootloader message was not $want: restored"

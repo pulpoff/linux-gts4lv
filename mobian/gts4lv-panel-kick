@@ -1,0 +1,25 @@
+#!/bin/sh
+# The ANA38401 is taken over from the bootloader, and on some boots it stays
+# dark although the driver switched it on. A display power-save cycle (what
+# fixes it by hand) re-runs the panel's full power-on, so do it once the GDM
+# greeter's shell is up.
+for i in $(seq 1 120); do
+	# The greeter's user: Debian-gdm up to GDM 48, gdm-greeter (a dynamic user) from GDM 51.
+	for U in gdm-greeter Debian-gdm; do
+		id -u "$U" >/dev/null 2>&1 || continue
+		P=$(pgrep -u "$U" -x gnome-shell | head -1)
+		[ -n "$P" ] && break
+	done
+	if [ -n "$P" ]; then
+		B=$(tr '\0' '\n' < /proc/$P/environ | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p')
+		psm() { runuser -u "$U" -- env DBUS_SESSION_BUS_ADDRESS="$B" gdbus call --session \
+			--dest org.gnome.Mutter.DisplayConfig --object-path /org/gnome/Mutter/DisplayConfig \
+			--method org.freedesktop.DBus.Properties.Set org.gnome.Mutter.DisplayConfig PowerSaveMode "<int32 $1>" >/dev/null 2>&1; }
+		if [ -n "$B" ] && psm 3; then
+			sleep 1.5
+			psm 0 && exit 0
+		fi
+	fi
+	sleep 1
+done
+exit 1

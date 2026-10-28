@@ -1,0 +1,10 @@
+[Unit]
+Description=Copy the Tab S5e's DSP firmware, sensor configs and registry for hexagonrpcd
+Before=hexagonrpcd-adsp-rootpd.service hexagonrpcd-adsp-sensorspd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/gts4lv-sensors-setup
+
+[Install]
+WantedBy=multi-user.target

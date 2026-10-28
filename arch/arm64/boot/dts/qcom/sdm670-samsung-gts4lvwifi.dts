@@ -1,0 +1,1262 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Samsung Galaxy Tab S5e (Wi-Fi), SM-T720 "gts4lvwifi".
+ *
+ * Bring-up device tree: eMMC, USB peripheral, keys, ramoops and the
+ * bootloader's splash as a simple-framebuffer. Memory map, regulators and
+ * board ids are taken from the device's own (downstream 4.9) device tree.
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/clock/qcom,gcc-sdm845.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+#include <dt-bindings/sound/qcom,q6afe.h>
+#include <dt-bindings/sound/qcom,q6asm.h>
+#include "sdm670.dtsi"
+#include "pm660.dtsi"
+#include "pm660l.dtsi"
+#include "sdm670-samsung-gts4lvwifi-dtbo-mask.dtsi"
+
+/*
+ * The tablet's firmware places these differently from the SoC defaults:
+ * ADSP is bigger and pushes the IPA/GPU regions up to 0x96800000.
+ */
+/delete-node/ &rmtfs_mem;
+/delete-node/ &adsp_mem;
+/delete-node/ &ipa_fw_mem;
+/delete-node/ &ipa_gsi_mem;
+/delete-node/ &gpu_mem;
+
+/ {
+	model = "Samsung Galaxy Tab S5e (Wi-Fi)";
+	compatible = "samsung,gts4lvwifi", "qcom,sdm670";
+	chassis-type = "tablet";
+
+	/* The bootloader picks this DTB by msm-id, then overlays by board-id. */
+	qcom,msm-id = <336 0>;
+	qcom,board-id = <0 0>;
+
+	aliases {
+		serial1 = &uart6;	/* Bluetooth; geni-serial refuses a port without a line */
+	};
+
+	chosen {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		framebuffer: framebuffer@9c000000 {
+			compatible = "simple-framebuffer";
+			memory-region = <&cont_splash_mem>;
+			width = <2560>;
+			height = <1600>;
+			stride = <(2560 * 4)>;
+			format = "a8r8g8b8";
+		};
+	};
+
+	/*
+	 * No panel = <&...> on the framebuffer for its size: fw_devlink makes
+	 * simpledrm wait for that node to probe, which a bare node never does,
+	 * so there was no /dev/dri and GDM no Wayland (2026-10-27).
+	 */
+
+	gpio-keys {
+		compatible = "gpio-keys";
+		autorepeat;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&vol_up_pin>, <&hall_default>;
+
+		key-vol-up {
+			label = "Volume Up";
+			linux,code = <KEY_VOLUMEUP>;
+			gpios = <&pm660l_gpios 7 GPIO_ACTIVE_LOW>;
+		};
+
+		/* Hall sensor for a magnetic book cover (downstream "hall", SW_FLIP). */
+		switch-cover {
+			label = "Cover";
+			linux,input-type = <EV_SW>;
+			linux,code = <SW_LID>;
+			gpios = <&tlmm 124 GPIO_ACTIVE_LOW>;
+			debounce-interval = <15>;
+		};
+	};
+
+	/*
+	 * Samsung's charger, fuel gauge and USB-PD controller sit on bit-banged
+	 * buses (downstream i2c@24/26/28). sm5705-battery reports the fuel gauge
+	 * and the charger's VBUS state; both chips charge on their own.
+	 */
+	i2c-fuelgauge {
+		compatible = "i2c-gpio";
+		sda-gpios = <&tlmm 95 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&tlmm 96 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		fuel-gauge@71 {
+			compatible = "siliconmitus,sm5705-fuel-gauge";
+			reg = <0x71>;
+			charge-full-design-microamp-hours = <7040000>;
+		};
+	};
+
+	i2c-charger {
+		compatible = "i2c-gpio";
+		sda-gpios = <&tlmm 43 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&tlmm 44 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		/* sm5705 MUIC at 0x25: the initramfs routes USB through it via i2c-dev */
+
+		charger@49 {
+			compatible = "siliconmitus,sm5705-charger";
+			reg = <0x49>;
+		};
+	};
+
+	i2c-usbpd {
+		compatible = "i2c-gpio";
+		sda-gpios = <&tlmm 55 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&tlmm 56 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		/* s2mm005 USB-PD controller at 0x33 */
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+
+		/* Downstream allocates rmtfs at this address (its uio map0), guarded as on the Pixel. */
+		rmtfs_lower_guard: rmtfs-lower-guard@fe300000 {
+			reg = <0 0xfe300000 0 0x1000>;
+			no-map;
+		};
+
+		rmtfs_mem: rmtfs-mem@fe301000 {
+			compatible = "qcom,rmtfs-mem";
+			reg = <0 0xfe301000 0 0x200000>;
+			no-map;
+
+			qcom,client-id = <1>;
+			qcom,vmid = <QCOM_SCM_VMID_MSS_MSA>;
+		};
+
+		rmtfs_upper_guard: rmtfs-upper-guard@fe501000 {
+			reg = <0 0xfe501000 0 0x1000>;
+			no-map;
+		};
+
+		kaslr_mem: kaslr@80001000 {
+			reg = <0 0x80001000 0 0x1000>;
+			no-map;
+		};
+
+		/* Downstream's removed_region runs up to 0x89300000 (the dtsi's ends at 0x88f00000). */
+		removed_tail_mem: removed-tail@88f00000 {
+			reg = <0 0x88f00000 0 0x400000>;
+			no-map;
+		};
+
+		adsp_mem: adsp@93e00000 {
+			reg = <0 0x93e00000 0 0x2a00000>;
+			no-map;
+		};
+
+		ipa_fw_mem: ipa-fw@96800000 {
+			reg = <0 0x96800000 0 0x10000>;
+			no-map;
+		};
+
+		ipa_gsi_mem: ipa-gsi@96810000 {
+			reg = <0 0x96810000 0 0x5000>;
+			no-map;
+		};
+
+		gpu_mem: gpu@96815000 {
+			reg = <0 0x96815000 0 0x2000>;
+			no-map;
+		};
+
+		cont_splash_mem: framebuffer@9c000000 {
+			reg = <0 0x9c000000 0 0x2300000>;
+			no-map;
+		};
+
+		dfps_data_mem: dfps-data@9e300000 {
+			reg = <0 0x9e300000 0 0x100000>;
+			no-map;
+		};
+
+		ss_plog_mem: ss-plog@a1100000 {
+			reg = <0 0xa1100000 0 0x200000>;
+			no-map;
+		};
+
+		/* Same layout as downstream, so Android can read our panics. */
+		ramoops@a1300000 {
+			compatible = "ramoops";
+			reg = <0 0xa1300000 0 0x100000>;
+			record-size = <0x40000>;
+			console-size = <0x40000>;
+			ftrace-size = <0x40000>;
+			pmsg-size = <0x40000>;
+		};
+
+		sec_debug_mem: sec-debug@a1400000 {
+			reg = <0 0xa1400000 0 0x800000>;
+			no-map;
+		};
+
+		sec_debug_autocomment_mem: sec-debug-autocomment@a1c00000 {
+			reg = <0 0xa1c00000 0 0x1000>;
+			no-map;
+		};
+
+		tima_mem: tima@b0000000 {
+			reg = <0 0xb0000000 0 0x200000>;
+			no-map;
+		};
+
+		rkp_mem: rkp@b0200000 {
+			reg = <0 0xb0200000 0 0x1500000>;
+			no-map;
+		};
+	};
+
+	vph_pwr: vph-pwr-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vph_pwr";
+		regulator-min-microvolt = <3700000>;
+		regulator-max-microvolt = <3700000>;
+
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	/* Modelled as a fixed supply, as on the Pixel 3a. */
+	vreg_s2b_1p05: vreg-s2b-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vreg_s2b";
+		regulator-min-microvolt = <1050000>;
+		regulator-max-microvolt = <1050000>;
+	};
+
+	/*
+	 * The accelerometer/gyro, compass and light sensor hang off the ADSP's
+	 * sensor core, which probes them itself, but their supply is an LDO
+	 * enabled by TLMM GPIO 29 (stock: qcom,gpio-sensor-ldo on the ADSP PIL
+	 * node, driven high before the ADSP boots). Without it the sensor core
+	 * comes up and registers no sensor at all.
+	 */
+	sensor_ldo: sensor-ldo-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "sensor_ldo";
+		gpio = <&tlmm 29 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		pinctrl-0 = <&sensor_ldo_default>;
+		pinctrl-names = "default";
+
+		regulator-always-on;
+		regulator-boot-on;
+	};
+};
+
+&apps_rsc {
+	regulators-0 {
+		compatible = "qcom,pm660-rpmh-regulators";
+		qcom,pmic-id = "a";
+
+		vdd-s4-supply = <&vph_pwr>;
+		vdd-s6-supply = <&vph_pwr>;
+
+		vdd-l1-l6-l7-supply = <&vreg_s6a_0p87>;
+		vdd-l2-l3-supply = <&vreg_s2b_1p05>;
+		vdd-l5-supply = <&vreg_s2b_1p05>;
+		vdd-l8-l9-l10-l11-l12-l13-l14-supply = <&vreg_s4a_2p04>;
+		vdd-l15-l16-l17-l18-l19-supply = <&vreg_bob>;
+
+		vreg_s4a_2p04: smps4 {
+			regulator-min-microvolt = <1808000>;
+			regulator-max-microvolt = <2040000>;
+			regulator-enable-ramp-delay = <200>;
+		};
+
+		vreg_l1a_1p225: ldo1 {
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1250000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_s6a_0p87: smps6 {
+			regulator-min-microvolt = <1224000>;
+			regulator-max-microvolt = <1352000>;
+			regulator-enable-ramp-delay = <150>;
+		};
+
+		vreg_l8a_1p8: ldo8 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-enable-ramp-delay = <250>;
+			regulator-always-on;
+		};
+
+		vreg_l5a_0p848: ldo5 {
+			regulator-min-microvolt = <800000>;
+			regulator-max-microvolt = <800000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l6a_1p3: ldo6 {
+			regulator-min-microvolt = <1248000>;
+			regulator-max-microvolt = <1304000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l9a_1p8: ldo9 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l10a_1p8: ldo10 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		/* Touchscreen DVDD (downstream stm,regulator_dvdd = "pm660_l11"). */
+		vreg_l11a_1p8: ldo11 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-enable-ramp-delay = <250>;
+			regulator-always-on;
+		};
+
+		/* Camera sensors' I/O rail (downstream cam_vio = pm660_l14). */
+		vreg_l14a_1p8: ldo14 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		/*
+		 * Ambient light sensor VDD (the SSC's /pmic/client/sensor_vdd).
+		 * The ADSP does not vote for it: downstream keeps it always-on at
+		 * 2.95 V with no consumer, and without it the veml3328 never probes.
+		 * 2.952 V: PLDOs step 8 mV from 1.664 V, and an exact 2.95 V fails
+		 * the whole node (eMMC I/O included).
+		 */
+		vreg_l17a_2p95: ldo17 {
+			regulator-min-microvolt = <2952000>;
+			regulator-max-microvolt = <2952000>;
+			regulator-enable-ramp-delay = <250>;
+			regulator-always-on;
+		};
+
+		/* Also always-on downstream with no consumer (Samsung's board part). */
+		vreg_l18a_2p8: ldo18 {
+			regulator-min-microvolt = <2800000>;
+			regulator-max-microvolt = <2904000>;
+			regulator-enable-ramp-delay = <250>;
+			regulator-always-on;
+		};
+
+		vreg_l19a_3p3: ldo19 {
+			regulator-min-microvolt = <3000000>;
+			regulator-max-microvolt = <3312000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+	};
+
+	regulators-1 {
+		compatible = "qcom,pm660l-rpmh-regulators";
+		qcom,pmic-id = "b";
+
+		vdd-l1-l9-l10-supply = <&vreg_s2b_1p05>;
+		vdd-l3-l5-l7-l8-supply = <&vreg_bob>;
+		vdd-l4-l6-supply = <&vreg_bob>;
+		vdd-bob-supply = <&vph_pwr>;
+
+		vreg_l1b_0p925: ldo1 {
+			regulator-min-microvolt = <880000>;
+			regulator-max-microvolt = <900000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		/* Downstream's icnss "vdd-3.3"; the mainline binding has no such supply. */
+		vreg_l3b_3p3: ldo3 {
+			regulator-min-microvolt = <3000000>;
+			regulator-max-microvolt = <3312000>;
+			regulator-enable-ramp-delay = <250>;
+			regulator-always-on;
+		};
+
+		vreg_l4b_2p95: ldo4 {
+			regulator-min-microvolt = <2960000>;
+			regulator-max-microvolt = <2960000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		/* Touchscreen AVDD (downstream stm,regulator_avdd = "pm660l_l6"). */
+		vreg_l6b_3p3: ldo6 {
+			regulator-min-microvolt = <3000000>;
+			regulator-max-microvolt = <3300000>;
+			regulator-enable-ramp-delay = <250>;
+			regulator-always-on;
+		};
+
+		vreg_l7b_3p125: ldo7 {
+			regulator-min-microvolt = <3088000>;
+			regulator-max-microvolt = <3100000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_bob: bob {
+			regulator-min-microvolt = <3296000>;
+			regulator-max-microvolt = <3328000>;
+			regulator-enable-ramp-delay = <500>;
+		};
+	};
+};
+
+/* Owned by the secure world as on the Pixel 3a; touching them resets the SoC. */
+&gcc {
+	protected-clocks = <GCC_QSPI_CORE_CLK>,
+			   <GCC_QSPI_CORE_CLK_SRC>,
+			   <GCC_QSPI_CNOC_PERIPH_AHB_CLK>;
+};
+
+/*
+ * dispcc used to park the MDP clock when it probed, which stopped the
+ * bootloader's display (black screen, then reset) long before msm loads.
+ * dispcc-sdm845 now leaves that RCG alone (clk_rcg2_shared_no_init_park_ops).
+ */
+&dispcc {
+	status = "okay";
+};
+
+&pm660l_gpios {
+	vol_up_pin: vol-up-state {
+		pins = "gpio7";
+		function = "normal";
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_NO>;
+		input-enable;
+		bias-pull-up;
+	};
+};
+
+&pon_pwrkey {
+	/*
+	 * A short press locks and blanks: GNOME offers to power off on
+	 * KEY_POWER (gnome-shell's own handling, not configurable), and suspend
+	 * takes USB, Wi-Fi and Bluetooth down. Holding it still resets.
+	 */
+	linux,code = <KEY_SCREENLOCK>;
+	status = "okay";
+};
+
+&pon_resin {
+	linux,code = <KEY_VOLUMEDOWN>;
+	status = "okay";
+};
+
+&sdhc_1 {
+	supports-cqe;
+	mmc-hs200-1_8v;
+	mmc-hs400-1_8v;
+	mmc-ddr-1_8v;
+
+	qcom,ddr-config = <0xc3040873>;
+
+	vmmc-supply = <&vreg_l4b_2p95>;
+	vqmmc-supply = <&vreg_l8a_1p8>;
+
+	status = "okay";
+};
+
+/* Secure-world GPIOs on SDM670 phones; touching them resets the SoC. */
+&tlmm {
+	gpio-reserved-ranges = <0 4>, <81 4>;
+
+	hall_default: hall-state {
+		pins = "gpio124";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	sensor_ldo_default: sensor-ldo-state {
+		pins = "gpio29";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	panel_te_default: panel-te-state {
+		pins = "gpio10";
+		function = "mdp_vsync";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
+	panel_vdd_default: panel-vdd-state {
+		pins = "gpio21";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	panel_tcon_rdy_default: panel-tcon-rdy-state {
+		pins = "gpio79";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
+	panel_reset_default: panel-reset-state {
+		pins = "gpio126";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+	};
+};
+
+&usb_1_hsphy {
+	vdd-supply = <&vreg_l1b_0p925>;
+	vdda-pll-supply = <&vreg_l10a_1p8>;
+	vdda-phy-dpdm-supply = <&vreg_l7b_3p125>;
+
+	status = "okay";
+};
+
+&usb_1 {
+	qcom,select-utmi-as-pipe-clk;
+	status = "okay";
+};
+
+&usb_1_dwc3 {
+	/*
+	 * Dual role, switched from userspace (/sys/class/usb_role): the S2MM005
+	 * Type-C/PD controller that detects an OTG adapter has no mainline
+	 * driver, and the SM5705 charger's boost gives VBUS. Device by default.
+	 */
+	dr_mode = "otg";
+	usb-role-switch;
+	role-switch-default-mode = "peripheral";
+
+	phys = <&usb_1_hsphy>;
+	phy-names = "usb2-phy";
+	maximum-speed = "high-speed";
+};
+
+&mss_pil {
+	firmware-name = "qcom/sdm670/gts4lv/mba.mbn", "qcom/sdm670/gts4lv/modem.mdt";
+	status = "okay";
+};
+
+/*
+ * Samsung's PON restart reasons. This OS lives in the recovery partition, so a
+ * plain reboot (reboot-mode calls it "normal") must ask for RECOVERY (0x01):
+ * NORMALBOOT (0x14) boots the boot partition, which looped until a key reset
+ * cleared the register (2026-10-27). "reboot android" asks for it on purpose:
+ * LineageOS, once userspace has cleared "boot-recovery" from misc.
+ */
+&pon {
+	/* Restart as a PMIC hard reset, as downstream does; ABL can hang on a warm one. */
+	qcom,hard-reset-restart;
+	mode-normal = <0x01>;
+	mode-recovery = <0x01>;
+	mode-android = <0x14>;
+	mode-download = <0x15>;
+};
+
+/*
+ * Video encoder/decoder. The firmware is Samsung's signed venus.mdt from the
+ * vendor partition; it only shows up once gts4lv-modem has set the firmware
+ * path, so venus_core is blacklisted and loaded by that script.
+ */
+&venus {
+	firmware-name = "qcom/sdm670/gts4lv/venus.mdt";
+	status = "okay";
+};
+
+&wifi {
+	vdd-0.8-cx-mx-supply = <&vreg_l5a_0p848>;
+	vdd-1.8-xo-supply = <&vreg_l9a_1p8>;
+	vdd-1.3-rfa-supply = <&vreg_l6a_1p3>;
+	vdd-3.3-ch0-supply = <&vreg_l19a_3p3>;
+
+	/* Samsung's WLAN firmware rejects the 8-bit host-cap message (QMI malformed). */
+	qcom,snoc-host-cap-skip-quirk;
+
+	status = "okay";
+};
+
+/* APSS watchdog, at the same address as on SDM845 (downstream qcom,wdt@17980000). */
+&soc {
+	watchdog@17980000 {
+		compatible = "qcom,apss-wdt-sdm845", "qcom,kpss-wdt";
+		reg = <0 0x17980000 0 0x1000>;
+		clocks = <&sleep_clk>;
+		interrupts = <GIC_SPI 0 IRQ_TYPE_EDGE_RISING>;
+	};
+};
+
+/*
+ * STM FTS touchscreen (fts1ba90a) at 0x49, IRQ on gpio123 active low. No
+ * mainline driver yet: userspace (gts4lv-touchd) drives it through i2c-dev.
+ */
+&qupv3_id_1 {
+	status = "okay";
+};
+
+&i2c9 {
+	clock-frequency = <400000>;
+	status = "okay";
+};
+
+/* WCN3990 Bluetooth on uart6, as in the postmarketOS port (Usia), which got it working. */
+&qupv3_id_0 {
+	status = "okay";
+};
+
+&uart6 {
+	pinctrl-0 = <&qup_uart6_4pin>;
+	status = "okay";
+
+	bluetooth {
+		compatible = "qcom,wcn3990-bt";
+		vddio-supply = <&vph_pwr>;
+		vddxo-supply = <&vreg_l9a_1p8>;
+		vddrf-supply = <&vreg_l6a_1p3>;
+		vddch0-supply = <&vreg_l19a_3p3>;
+		max-speed = <3200000>;
+		/*
+		 * THIS tablet's address (efs/bluetooth/bt_addr 50:50:A4:90:43:23,
+		 * little-endian). Android's bootloader fills it in; without it the
+		 * controller stays unconfigured and GNOME cannot switch it on.
+		 */
+		local-bd-address = [23 43 90 a4 50 50];
+	};
+};
+
+/* The QUP i2c/uart controllers refuse to probe without their GPI DMA engines. */
+&gpi_dma0 {
+	status = "okay";
+};
+
+&gpi_dma1 {
+	status = "okay";
+};
+
+/*
+ * Audio DSP; it also hosts the sensor hub (SSC), which userspace reaches over
+ * fastrpc (hexagonrpcd + libssc). Context banks from downstream adsprpc-smd.
+ */
+&adsp_pas {
+	firmware-name = "qcom/sdm670/gts4lv/adsp.mdt";
+	/*
+	 * Not auto-started in practice: the firmware path is only set later by
+	 * gts4lv-modem. Start it by hand: echo start > .../remoteprocN/state.
+	 */
+	status = "okay";
+
+	glink-edge {
+		fastrpc {
+			compatible = "qcom,fastrpc";
+			qcom,glink-channels = "fastrpcglink-apps-dsp";
+			label = "adsp";
+			qcom,non-secure-domain;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			compute-cb@3 {
+				compatible = "qcom,fastrpc-compute-cb";
+				reg = <3>;
+				iommus = <&apps_smmu 0x1803 0x0>;
+			};
+
+			compute-cb@4 {
+				compatible = "qcom,fastrpc-compute-cb";
+				reg = <4>;
+				iommus = <&apps_smmu 0x1804 0x0>;
+			};
+
+			compute-cb@5 {
+				compatible = "qcom,fastrpc-compute-cb";
+				reg = <5>;
+				iommus = <&apps_smmu 0x1805 0x0>;
+			};
+		};
+	};
+};
+
+/*
+ * Adreno 615, render-only for now: the display stays on simpledrm until MDSS
+ * and the dual-DSI panel are brought up. SQE/GMU firmware come from vendor,
+ * the zap shader from apnhlos (gts4lv-modem links both into the fw path).
+ */
+&gpu {
+	status = "okay";
+};
+
+&gpu_zap_shader {
+	firmware-name = "qcom/sdm670/gts4lv/a615_zap.mdt";
+};
+
+/*
+ * Display: Samsung AMSA05RB01 AMOLED behind an Anapass ANA38401 TCON,
+ * 2560x1600 as two 1280x1600 halves, DSI0 master + DSI1, command mode, TE on
+ * gpio10. Supplies and GPIOs from the downstream qcom,dsi-display@0 node.
+ */
+/ {
+	panel_vddlcd: regulator-panel-vddlcd {
+		compatible = "regulator-fixed";
+		regulator-name = "octa-vdd";
+		gpio = <&tlmm 21 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-boot-on;
+		pinctrl-0 = <&panel_vdd_default>;
+		pinctrl-names = "default";
+	};
+};
+
+/*
+ * Parked (2026-10-27): the first msm boot showed GDM, every later one stayed
+ * black, and once Linux had driven the panel ABL looped on every soft reboot
+ * until a key reset. simpledrm until that is understood.
+ */
+&mdss {
+	status = "okay";
+};
+
+&mdss_dsi0 {
+	vdda-supply = <&vreg_l1a_1p225>;
+	qcom,dual-dsi-mode;
+	/*
+	 * No qcom,sync-dual-dsi (on either link): with it msm drops every
+	 * command written on DSI0 (reporting success) and broadcasts DSI1's to
+	 * both links. The TCON wants them on DSI0 only (samsung,cmds-unicast).
+	 */
+	qcom,master-dsi;
+	pinctrl-0 = <&panel_te_default>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	panel@0 {
+		compatible = "samsung,ana38401-amsa05rb01";
+		reg = <0>;
+		vddlcd-supply = <&panel_vddlcd>;
+		reset-gpios = <&tlmm 126 GPIO_ACTIVE_LOW>;
+		tcon-rdy-gpios = <&tlmm 79 GPIO_ACTIVE_HIGH>;
+		pinctrl-0 = <&panel_reset_default>, <&panel_tcon_rdy_default>;
+		pinctrl-names = "default";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+				panel_in_0: endpoint {
+					remote-endpoint = <&mdss_dsi0_out>;
+				};
+			};
+
+			port@1 {
+				reg = <1>;
+				panel_in_1: endpoint {
+					remote-endpoint = <&mdss_dsi1_out>;
+				};
+			};
+		};
+	};
+};
+
+&mdss_dsi0_out {
+	data-lanes = <0 1 2 3>;
+	remote-endpoint = <&panel_in_0>;
+};
+
+&mdss_dsi0_phy {
+	vdds-supply = <&vreg_l1b_0p925>;
+	status = "okay";
+};
+
+&mdss_dsi1 {
+	vdda-supply = <&vreg_l1a_1p225>;
+	qcom,dual-dsi-mode;
+	/* DSI1 is the slave: it runs from DSI0's PLL. */
+	assigned-clock-parents = <&mdss_dsi0_phy DSI_BYTE_PLL_CLK>,
+				 <&mdss_dsi0_phy DSI_PIXEL_PLL_CLK>;
+	status = "okay";
+};
+
+&mdss_dsi1_out {
+	data-lanes = <0 1 2 3>;
+	remote-endpoint = <&panel_in_1>;
+};
+
+&mdss_dsi1_phy {
+	vdds-supply = <&vreg_l1b_0p925>;
+	status = "okay";
+};
+
+/*
+ * Sound. Four CS35L41 amps on Secondary TDM (left pair slot 0, right pair
+ * slot 1, from Android's mixer_paths.xml) and the analog mics on the PM660L
+ * codec behind the LPASS digital codec, as on the Pixel 3a.
+ */
+/ {
+	int_cdc_bclk: int-cdc-bclk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <1536000>;
+	};
+
+	sound {
+		compatible = "qcom,sdm660-sndcard";
+		model = "Galaxy Tab S5e";
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&cdc_pdm_default>, <&sec_tdm_default>;
+
+		audio-routing = "Analog PDM_RX1", "Digital PDM_RX1",
+				"Analog PDM_RX2", "Digital PDM_RX2",
+				"Analog PDM_RX3", "Digital PDM_RX3",
+				"Digital LPASS_PDM_TX", "Analog PDM_TX",
+				"Analog AMIC1", "Analog MIC BIAS External1",
+				"Analog AMIC2", "Analog MIC BIAS External2",
+				"Analog AMIC3", "Analog MIC BIAS External1";
+
+		mm1-dai-link {
+			link-name = "MultiMedia1";
+			cpu {
+				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>;
+			};
+		};
+
+		mm2-dai-link {
+			link-name = "MultiMedia2";
+			cpu {
+				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA2>;
+			};
+		};
+
+		mm3-dai-link {
+			link-name = "MultiMedia3";
+			cpu {
+				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA3>;
+			};
+		};
+
+		sec-tdm-rx-link {
+			link-name = "Speaker Playback";
+			cpu {
+				sound-dai = <&q6afedai SECONDARY_TDM_RX_0>;
+			};
+			platform {
+				sound-dai = <&q6routing>;
+			};
+			codec {
+				sound-dai = <&cs35l41_fl 0>, <&cs35l41_fr 0>,
+					    <&cs35l41_rl 0>, <&cs35l41_rr 0>;
+			};
+		};
+
+		int0-mi2s-rx-link {
+			link-name = "Headphone Playback";
+			cpu {
+				sound-dai = <&q6afedai INT0_MI2S_RX>;
+			};
+			platform {
+				sound-dai = <&q6routing>;
+			};
+			codec {
+				sound-dai = <&pm660l_codec 0>, <&lpass_codec 0>;
+			};
+		};
+
+		int3-mi2s-tx-link {
+			link-name = "Mic Capture";
+			cpu {
+				sound-dai = <&q6afedai INT3_MI2S_TX>;
+			};
+			platform {
+				sound-dai = <&q6routing>;
+			};
+			codec {
+				sound-dai = <&pm660l_codec 1>, <&lpass_codec 1>;
+			};
+		};
+	};
+};
+
+&i2c7 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	/* downstream "cirrus,mfd-suffix" "_r" */
+	cs35l41_fr: audio-codec@40 {
+		compatible = "cirrus,cs35l41";
+		reg = <0x40>;
+		interrupts-extended = <&tlmm 78 IRQ_TYPE_LEVEL_LOW>;
+		/* one line for all four; the driver copes with a shared reset */
+		reset-gpios = <&tlmm 100 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&amp_irq_default>;
+		/* downstream leaves boost at reset defaults: 1.0 uH, < 20 uF */
+		cirrus,boost-type = <0>;
+		cirrus,boost-peak-milliamp = <3100>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-cap-microfarad = <15>;
+		cirrus,asp-sdout-hiz = <3>;
+		cirrus,asp-rx-slots = <1 2>;
+		sound-name-prefix = "FR";
+		#sound-dai-cells = <1>;
+	};
+
+	/* downstream "cirrus,mfd-suffix" "" */
+	cs35l41_fl: audio-codec@41 {
+		compatible = "cirrus,cs35l41";
+		reg = <0x41>;
+		interrupts-extended = <&tlmm 78 IRQ_TYPE_LEVEL_LOW>;
+		/* one line for all four; the driver copes with a shared reset */
+		reset-gpios = <&tlmm 100 GPIO_ACTIVE_HIGH>;
+		
+		/* downstream leaves boost at reset defaults: 1.0 uH, < 20 uF */
+		cirrus,boost-type = <0>;
+		cirrus,boost-peak-milliamp = <3100>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-cap-microfarad = <15>;
+		cirrus,asp-sdout-hiz = <3>;
+		cirrus,asp-rx-slots = <0 1>;
+		sound-name-prefix = "FL";
+		#sound-dai-cells = <1>;
+	};
+
+	/* downstream "cirrus,mfd-suffix" "_br" */
+	cs35l41_rr: audio-codec@42 {
+		compatible = "cirrus,cs35l41";
+		reg = <0x42>;
+		interrupts-extended = <&tlmm 78 IRQ_TYPE_LEVEL_LOW>;
+		/* one line for all four; the driver copes with a shared reset */
+		reset-gpios = <&tlmm 100 GPIO_ACTIVE_HIGH>;
+		
+		/* downstream leaves boost at reset defaults: 1.0 uH, < 20 uF */
+		cirrus,boost-type = <0>;
+		cirrus,boost-peak-milliamp = <3100>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-cap-microfarad = <15>;
+		cirrus,asp-sdout-hiz = <3>;
+		cirrus,asp-rx-slots = <1 2>;
+		sound-name-prefix = "RR";
+		#sound-dai-cells = <1>;
+	};
+
+	/* downstream "cirrus,mfd-suffix" "_b" */
+	cs35l41_rl: audio-codec@43 {
+		compatible = "cirrus,cs35l41";
+		reg = <0x43>;
+		interrupts-extended = <&tlmm 78 IRQ_TYPE_LEVEL_LOW>;
+		/* one line for all four; the driver copes with a shared reset */
+		reset-gpios = <&tlmm 100 GPIO_ACTIVE_HIGH>;
+		
+		/* downstream leaves boost at reset defaults: 1.0 uH, < 20 uF */
+		cirrus,boost-type = <0>;
+		cirrus,boost-peak-milliamp = <3100>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-cap-microfarad = <15>;
+		cirrus,asp-sdout-hiz = <3>;
+		cirrus,asp-rx-slots = <0 1>;
+		sound-name-prefix = "RL";
+		#sound-dai-cells = <1>;
+	};
+};
+
+&lpass_codec {
+	clocks = <&q6afecc LPASS_CLK_ID_INT_MCLK_0 LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
+		 <&int_cdc_bclk>;
+	clock-names = "mclk", "ahbix-clk";
+	assigned-clocks = <&q6afecc LPASS_CLK_ID_INT_MCLK_0 LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
+	assigned-clock-rates = <9600000>;
+	status = "okay";
+};
+
+&lpi_tlmm {
+	/*
+	 * Downstream drives only 8-11 (TDM) and 18-29 (codec); the rest belong
+	 * to the sensor hub and are protected: reading them hangs the bus.
+	 * The block is also dead until the ADSP is up, so its module is loaded
+	 * only after gts4lv-modem has started the ADSP.
+	 */
+	gpio-reserved-ranges = <0 8>, <12 6>, <30 2>;
+	status = "okay";
+
+	sec_tdm_default: sec-tdm-default-state {
+		clk-pins {
+			pins = "gpio8";
+			function = "i2s1_clk";
+			drive-strength = <8>;
+			bias-disable;
+		};
+
+		ws-pins {
+			pins = "gpio9";
+			function = "i2s1_ws";
+			drive-strength = <8>;
+			bias-disable;
+		};
+
+		data-pins {
+			pins = "gpio10", "gpio11";
+			function = "i2s1_data";
+			drive-strength = <8>;
+			bias-disable;
+		};
+	};
+};
+
+&pm660l_codec {
+	vdd-cdc-io-supply = <&vreg_l10a_1p8>;
+	vdd-cdc-tx-rx-cx-supply = <&vreg_l1b_0p925>;
+	vdd-micbias-supply = <&vreg_l7b_3p125>;
+	qcom,micbias-lvl = <2800>;
+	qcom,micbias1-ext-cap;
+	status = "okay";
+};
+
+&q6afedai {
+	dai@28 {
+		reg = <SECONDARY_TDM_RX_0>;
+		qcom,tdm-sync-mode = <0>;
+		qcom,tdm-sync-src = <1>;
+		qcom,tdm-data-out = <0>;
+		qcom,tdm-invert-sync = <0>;
+		qcom,tdm-data-delay = <1>;
+		qcom,tdm-data-align = <0>;
+	};
+
+	dai@95 {
+		reg = <INT0_MI2S_RX>;
+		qcom,sd-lines = <0 1>;
+	};
+
+	dai@9c {
+		reg = <INT3_MI2S_TX>;
+		qcom,sd-lines = <0 1>;
+	};
+};
+
+&q6asmdai {
+	dai@0 {
+		reg = <0>;
+	};
+
+	dai@1 {
+		reg = <1>;
+	};
+
+	dai@2 {
+		reg = <2>;
+	};
+};
+
+&tlmm {
+	amp_irq_default: amp-irq-state {
+		pins = "gpio78";
+		function = "gpio";
+		bias-pull-up;
+	};
+};
+
+/*
+ * PM660L's power-on block. Downstream marks it "qcom,secondary-pon-reset"
+ * with a shutdown as its PS_HOLD reset; left unconfigured it stayed up across
+ * a reboot and ABL then looped (splash, black, splash) until Power+Vol-Down
+ * power-cycled every PMIC.
+ */
+&spmi_bus {
+	pmic@2 {
+		pon@800 {
+			compatible = "qcom,pm8998-pon";
+			reg = <0x800>;
+			qcom,secondary-pon-reset;
+		};
+	};
+};
+
+/*
+ * Cameras, from the downstream qcom,cci node and the vendor sensor modules
+ * (com.samsung.sensormodule.*.bin: both answer at 0x5a, i.e. 0x2d, id at 0x0000):
+ *   rear  S5K3M5 13 MP  CSIPHY0, MCLK0 (gpio13), reset gpio40, CCI master 1
+ *   front S5K4HA  8 MP  CSIPHY1, MCLK1 (gpio14), reset gpio99, CCI master 0
+ * Each module's analogue/digital rails come from external LDOs behind one
+ * enable GPIO (gpio12 rear, gpio39 front); I/O is PM660 L14. The rear VCM and
+ * both EEPROMs sit on a separate bit-banged I2C (gpio27/28), not described yet.
+ */
+/ {
+	cam_rear_pwr: regulator-cam-rear {
+		compatible = "regulator-fixed";
+		regulator-name = "cam_rear_pwr";
+		gpio = <&tlmm 12 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <1000>;
+		pinctrl-0 = <&cam_rear_pwr_default>;
+		pinctrl-names = "default";
+	};
+
+	cam_front_pwr: regulator-cam-front {
+		compatible = "regulator-fixed";
+		regulator-name = "cam_front_pwr";
+		gpio = <&tlmm 39 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <1000>;
+		pinctrl-0 = <&cam_front_pwr_default>;
+		pinctrl-names = "default";
+	};
+};
+
+&tlmm {
+	cam_rear_pwr_default: cam-rear-pwr-default-state {
+		pins = "gpio12";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_front_pwr_default: cam-front-pwr-default-state {
+		pins = "gpio39";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_rear_reset_default: cam-rear-reset-default-state {
+		pins = "gpio40";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_front_reset_default: cam-front-reset-default-state {
+		pins = "gpio99";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+};
+
+&camss {
+	vdda-phy-supply = <&vreg_l1a_1p225>;
+	vdda-pll-supply = <&vreg_s6a_0p87>;
+
+	status = "okay";
+};
+
+&camss_port0 {
+	camss_endpoint0: endpoint {
+		clock-lanes = <7>;
+		data-lanes = <0 1 2 3>;
+		remote-endpoint = <&cam_rear_endpoint>;
+	};
+};
+
+&cci {
+	pinctrl-0 = <&cci0_default &cci1_default>;
+	pinctrl-1 = <&cci0_sleep &cci1_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	status = "okay";
+};
+
+/* Front camera: no S5K4HA driver yet, and CAMSS waits for every sensor it links. */
+#define GTS4LV_FRONT_CAMERA
+#ifdef GTS4LV_FRONT_CAMERA
+&camss_port1 {
+	camss_endpoint1: endpoint {
+		clock-lanes = <7>;
+		data-lanes = <0 1 2 3>;
+		remote-endpoint = <&cam_front_endpoint>;
+	};
+};
+
+&cci_i2c0 {
+	camera@2d {
+		compatible = "samsung,s5k4ha";
+		reg = <0x2d>;
+
+		clocks = <&camcc CAM_CC_MCLK1_CLK>;
+		assigned-clocks = <&camcc CAM_CC_MCLK1_CLK>;
+		assigned-clock-rates = <24000000>;
+
+		reset-gpios = <&tlmm 99 GPIO_ACTIVE_LOW>;
+		pinctrl-0 = <&cam_mclk1_default &cam_front_reset_default>;
+		pinctrl-names = "default";
+
+		vdda-supply = <&cam_front_pwr>;
+		vddd-supply = <&cam_front_pwr>;
+		vddio-supply = <&vreg_l14a_1p8>;
+
+		/* The sensor reads out upright in landscape, the way the tablet is used. */
+		rotation = <0>;
+		orientation = <0>;
+
+		port {
+			cam_front_endpoint: endpoint {
+				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <334000000>;
+				remote-endpoint = <&camss_endpoint1>;
+			};
+		};
+	};
+};
+
+#endif
+
+&cci_i2c1 {
+	camera@2d {
+		compatible = "samsung,s5k3m5-gts4lv", "samsung,s5k3m5";
+		reg = <0x2d>;
+
+		clocks = <&camcc CAM_CC_MCLK0_CLK>;
+		assigned-clocks = <&camcc CAM_CC_MCLK0_CLK>;
+		assigned-clock-rates = <24000000>;
+
+		reset-gpios = <&tlmm 40 GPIO_ACTIVE_LOW>;
+		pinctrl-0 = <&cam_mclk0_default &cam_rear_reset_default>;
+		pinctrl-names = "default";
+
+		afvdd-supply = <&cam_rear_pwr>;
+		vdda-supply = <&cam_rear_pwr>;
+		vddd-supply = <&cam_rear_pwr>;
+		vddio-supply = <&vreg_l14a_1p8>;
+
+		/* Like the front sensor: reads out upright in landscape. */
+		rotation = <0>;
+		orientation = <1>;
+
+		port {
+			cam_rear_endpoint: endpoint {
+				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <688000000>;
+				remote-endpoint = <&camss_endpoint0>;
+			};
+		};
+	};
+};
+
+/* the SoC by its marketing name, for /proc/cpuinfo's "model name" (arm64 cpuinfo.c) */
+&{/cpus} {
+	cpu-model-name = "Qualcomm Snapdragon 670";
+};

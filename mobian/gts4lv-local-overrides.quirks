@@ -1,0 +1,6 @@
+# The owner's "BT5.2" Bluetooth keyboard: its consumer-control part claims
+# horizontal scroll, which makes it a pointer, and GNOME then shows the cursor.
+[BT5.2 Keyboard]
+MatchName=BT5.2 Keyboard
+MatchBus=bluetooth
+AttrEventCode=-REL_HWHEEL;-REL_HWHEEL_HI_RES;

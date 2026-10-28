@@ -1,0 +1,77 @@
+#!/usr/bin/python3 -I
+# Run by pkexec for the user who called it (PKEXEC_UID): sets their lock type, and for "pattern" the
+# pattern itself (dots 1-9 in order, read from stdin) as a salted SHA-256. "swipe" also turns GDM's
+# automatic login on for them, and any other type turns it off again.
+#   gts4lv-lock-set type pattern|password|swipe
+#   gts4lv-lock-set pattern            (pattern on stdin)
+#   gts4lv-lock-set show
+import hashlib, json, os, pwd, re, secrets, sys
+
+DIR, GDM = "/var/lib/gts4lv-lock", "/etc/gdm3/daemon.conf"
+
+
+def user():
+    uid = os.environ.get("PKEXEC_UID")
+    if uid is None:
+        sys.exit("run through pkexec")
+    return pwd.getpwuid(int(uid)).pw_name
+
+
+def load(name):
+    try:
+        with open(f"{DIR}/{name}") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {"type": "password"}
+
+
+def save(name, conf):
+    os.makedirs(DIR, mode=0o700, exist_ok=True)
+    tmp = f"{DIR}/.{name}.tmp"
+    with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        json.dump(conf, f)
+    os.replace(tmp, f"{DIR}/{name}")
+    # The type alone, readable by the shells (lock screen and login screen) to pick their prompt.
+    tmp = f"{DIR}/.{name}.type.tmp"
+    with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644), "w") as f:
+        f.write(conf["type"] + ("" if conf.get("hash") or conf["type"] != "pattern" else "-unset"))
+    os.replace(tmp, f"{DIR}/{name}.type")
+    os.chmod(DIR, 0o711)
+
+
+def autologin(name, on):
+    """[daemon] AutomaticLoginEnable/AutomaticLogin in gdm3's daemon.conf."""
+    try:
+        text = open(GDM).read()
+    except OSError:
+        return
+    text = re.sub(r"(?m)^\s*#?\s*AutomaticLogin(Enable)?\s*=.*\n", "", text)
+    if on:
+        text = re.sub(r"(?m)^\[daemon\]\s*\n",
+                      f"[daemon]\nAutomaticLoginEnable = true\nAutomaticLogin = {name}\n", text, count=1)
+    with open(GDM + ".tmp", "w") as f:
+        f.write(text)
+    os.replace(GDM + ".tmp", GDM)
+
+
+def main():
+    name = user()
+    conf = load(name)
+    if sys.argv[1:2] == ["show"]:
+        print(conf["type"] + (" (pattern set)" if conf.get("hash") else ""))
+    elif sys.argv[1:2] == ["type"] and len(sys.argv) == 3 and sys.argv[2] in ("pattern", "password", "swipe"):
+        conf["type"] = sys.argv[2]
+        save(name, conf)
+        autologin(name, conf["type"] == "swipe")
+    elif sys.argv[1:] == ["pattern"]:
+        p = sys.stdin.readline().strip()
+        if not (4 <= len(p) <= 9 and set(p) <= set("123456789") and len(set(p)) == len(p)):
+            sys.exit("a pattern is 4 to 9 different dots, 1-9")
+        conf["salt"] = secrets.token_hex(16)
+        conf["hash"] = hashlib.sha256((conf["salt"] + p).encode()).hexdigest()
+        save(name, conf)
+    else:
+        sys.exit("usage: gts4lv-lock-set type pattern|password|swipe | pattern | show")
+
+
+main()

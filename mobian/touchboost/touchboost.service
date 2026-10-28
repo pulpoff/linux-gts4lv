@@ -1,0 +1,12 @@
+[Unit]
+Description=Touch input boost (CPU and GPU minimum clocks raised while touching and for a fling after)
+After=systemd-udev-settle.service
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/sbin/touchboost.py
+Restart=always
+RestartSec=2
+Nice=-10
+
+[Install]
+WantedBy=multi-user.target

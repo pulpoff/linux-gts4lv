@@ -1,0 +1,47 @@
+#!/usr/bin/python3
+# "Android": restart the tablet into LineageOS, after asking. One GNOME alert dialog (the same as the
+# shell's and Settings' confirmations); the restart itself is gts4lv-boot-android, run as root through
+# pkexec.
+import subprocess, sys
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gtk
+
+APP_ID = "de.gts4lv.BootAndroid"
+HELPER = "/usr/local/sbin/gts4lv-boot-android"
+
+
+class App(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID)
+        self.dialog = None
+
+    def do_activate(self):
+        if self.dialog:
+            self.dialog.present(None)
+            return
+        self.hold()	# a dialog with no parent is no application window
+        self.ask("Are you sure?", "This will reboot the tablet and boot Android.\n\n"
+                 "To come back, choose Restart → Recovery in Android.")
+
+    def ask(self, heading, body):
+        d = self.dialog = Adw.AlertDialog(heading=heading, body=body)
+        d.add_response("cancel", "Cancel")
+        d.add_response("yes", "Yes")
+        d.set_response_appearance("yes", Adw.ResponseAppearance.DESTRUCTIVE)
+        d.set_default_response("cancel")
+        d.set_close_response("cancel")
+        d.connect("response", self.response)
+        d.present(None)
+
+    def response(self, dialog, response):
+        if response == "yes":
+            r = subprocess.run(["pkexec", HELPER], capture_output=True, text=True)
+            if r.returncode:	# a restart that goes ahead never returns
+                self.ask("Could not restart", r.stderr.strip() or "The restart was refused.")
+                return
+        self.release()
+
+
+sys.exit(App().run(sys.argv))

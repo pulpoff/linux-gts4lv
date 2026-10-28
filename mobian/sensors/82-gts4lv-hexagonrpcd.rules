@@ -1,0 +1,1 @@
+SUBSYSTEM=="misc", KERNEL=="fastrpc-adsp", TAG+="systemd", ENV{SYSTEMD_WANTS}+="hexagonrpcd-adsp-rootpd.service hexagonrpcd-adsp-sensorspd.service"

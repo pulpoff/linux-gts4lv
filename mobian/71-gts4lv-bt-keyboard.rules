@@ -1,0 +1,5 @@
+# The owner's "BT5.2" Bluetooth keyboard announces a mouse it does not have (a
+# "BT5.2 Keyboard Mouse" node, and pointer bits on the keyboard node). GNOME
+# leaves touch mode, and shows the pointer, while any pointing device exists.
+ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="BT5.2 Keyboard Mouse", ENV{LIBINPUT_IGNORE_DEVICE}="1"
+ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="BT5.2 Keyboard", ENV{ID_INPUT_MOUSE}="0"

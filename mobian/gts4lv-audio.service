@@ -1,0 +1,14 @@
+[Unit]
+Description=Audio DSP (sound card)
+ConditionPathExists=/etc/gts4lv/modem.enable
+# gts4lv-modem sets the firmware path; GDM first, so audio cannot hold it up.
+After=gts4lv-modem.service gdm.service
+Requires=gts4lv-modem.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/gts4lv-audio start
+ExecStop=/usr/local/sbin/gts4lv-audio stop
+TimeoutStopSec=10
+[Install]
+WantedBy=multi-user.target

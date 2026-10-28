@@ -1,0 +1,43 @@
+#!/bin/sh
+# USB port role, until the S2MM005 Type-C controller has a driver:
+#   gts4lv-usb-mode host     OTG: USB host, and the SM5705 boosts VBUS to 5.1 V
+#   gts4lv-usb-mode device   back to the gadget (USB networking, charging)
+#   gts4lv-usb-mode          print the current role and charger mode
+# SM5705 (i2c-charger, 0x49), from Samsung's sm5705_charger_oper.c:
+#   CNTL 0x0C[2:0] operation mode: 5 = charge, 7 = USB OTG, 0 = suspend
+#   FLEDCNTL6 0x20[3:0] boost out: 0x5 = 4.5 V, 0xB = 5.1 V
+#   CHGCNTL6 0x14[3:2] OTG current limit: 3 = 1.5 A
+set -e
+BUS=$(for d in /sys/bus/i2c/devices/i2c-*; do [ "$(cat $d/name)" = i2c-charger ] && basename $d; done | cut -d- -f2)
+ROLE=$(ls -d /sys/class/usb_role/*/ | head -1)role
+rd() { i2cget -f -y $BUS 0x49 $1; }
+upd() { v=$(( ($(rd $1) & ~$2) | $3 )); i2cset -f -y $BUS 0x49 $1 $v; }
+
+case "$1" in
+host)
+	# Never boost into a supply: STATUS1 0x08 bit 0 is VBUS present (a
+	# charger or PC on the port). An OTG adapter has no VBUS of its own.
+	if [ "$(cat $ROLE)" != host ] && [ $(( $(rd 0x08) & 1 )) = 1 ]; then
+		echo "VBUS is present (charger or PC connected): not switching to host" >&2
+		exit 1
+	fi
+	upd 0x14 0x0c 0x0c	# OTG current 1.5 A
+	upd 0x20 0x0f 0x0b	# boost 5.1 V
+	upd 0x0c 0x07 0x07	# USB OTG mode: VBUS on
+	sleep 0.1
+	echo host > $ROLE
+	;;
+device)
+	echo device > $ROLE
+	upd 0x0c 0x07 0x00	# through suspend, as Samsung does (BAT_REG settles)
+	sleep 0.1
+	upd 0x0c 0x07 0x05	# charge
+	upd 0x20 0x0f 0x05	# boost back to 4.5 V
+	;;
+"")
+	echo "role $(cat $ROLE), charger mode $(( $(rd 0x0c) & 7 )) (5 charge, 7 otg)"
+	;;
+*)
+	echo "usage: $0 [host|device]" >&2; exit 2
+	;;
+esac

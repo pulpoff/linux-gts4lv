@@ -1,0 +1,58 @@
+#!/bin/sh
+# Wi-Fi on mainline SDM670: modem firmware from eMMC (read-only), rmtfs on RAM
+# copies of the modem storage (Android's partitions are never written), then
+# wpa_supplicant + DHCP. Harmless on a DT without the remoteproc/wifi nodes:
+# it just waits for wlan0.
+log() { echo "wifi-up: $*" > /dev/kmsg; echo "wifi-up: $*"; }
+
+part() { # partition device by GPT name
+	for u in /sys/class/block/*/uevent; do
+		grep -qx "PARTNAME=$1" "$u" && { echo /dev/$(basename $(dirname $u)); return; }
+	done
+}
+
+FW=/run/fw
+mkdir -p /run/modem /run/apnhlos /run/vendor $FW/qcom/sdm670/gts4lv /dev/disk/by-partlabel
+[ -d /run/modem/image ] || mount -t vfat -o ro "$(part modem)" /run/modem
+[ -d /run/apnhlos/image ] || mount -t vfat -o ro "$(part apnhlos)" /run/apnhlos
+[ -d /run/vendor/firmware ] || mount -t ext4 -o ro,noload "$(part vendor)" /run/vendor
+for f in /run/modem/image/* /run/apnhlos/image/* /run/vendor/firmware/*; do
+	ln -sf "$f" $FW/qcom/sdm670/gts4lv/ 2>/dev/null
+	ln -sf "$f" $FW/ 2>/dev/null
+done
+# ath10k looks for its board data under ath10k/WCN3990/hw1.0.
+mkdir -p $FW/ath10k/WCN3990/hw1.0
+[ -e /run/vendor/firmware/wlan ] && ln -sf /run/vendor/firmware/wlan $FW/wlan
+echo -n $FW > /sys/module/firmware_class/parameters/path
+
+# RAM copies of the modem's storage partitions for rmtfs.
+mkdir -p /run/efs
+for p in modemst1 modemst2 fsg fsc; do
+	d=$(part $p); [ -n "$d" ] || continue
+	[ -f /run/efs/$p ] || dd if=$d of=/run/efs/$p bs=1M 2>/dev/null
+done
+ln -sf modemst1 /run/efs/modem_fs1; ln -sf modemst2 /run/efs/modem_fs2
+ln -sf fsg /run/efs/modem_fsg; ln -sf fsc /run/efs/modem_fsc
+
+pidof rmtfs >/dev/null || rmtfs -r -o /run/efs -v > /run/rmtfs.log 2>&1 &
+pidof tqftpserv >/dev/null || tqftpserv > /run/tqftpserv.log 2>&1 &
+
+# A previous boot that started the modem and never got wlan0 probably died in
+# it; its console is in pstore. Don't start it again, or a crash would loop.
+if grep -qs GTS4LV-MSS-START /sys/fs/pstore/* && ! grep -qs GTS4LV-MSS-OK /sys/fs/pstore/*; then
+	log "previous boot died starting the modem (see /sys/fs/pstore), not starting it"; exit 1
+fi
+log "GTS4LV-MSS-START"
+# Start the modem if the DT has it (Wi-Fi firmware runs on it).
+for r in /sys/class/remoteproc/remoteproc*; do
+	[ -f $r/name ] || continue
+	log "remoteproc $(cat $r/name): $(cat $r/state)"
+	[ "$(cat $r/state)" = offline ] && echo start > $r/state 2>/dev/null
+done
+
+for i in $(seq 120); do [ -d /sys/class/net/wlan0 ] && break; sleep 1; done
+if [ ! -d /sys/class/net/wlan0 ]; then log "no wlan0"; exit 1; fi
+log "GTS4LV-MSS-OK: wlan0 is up, associating"
+ip link set wlan0 up
+pidof wpa_supplicant >/dev/null || wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant.conf -f /run/wpa.log
+udhcpc -i wlan0 -b -s /etc/udhcpc.script -p /run/udhcpc.wlan0.pid

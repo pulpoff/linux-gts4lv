@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=Yesman Debian
+Description=Red Debian swirl on black, the same picture the initramfs draws: one still image until GDM
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/yesman-debian
+ScriptFile=/usr/share/plymouth/themes/yesman-debian/yesman-debian.script

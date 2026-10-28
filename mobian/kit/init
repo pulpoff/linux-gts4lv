@@ -1,0 +1,166 @@
+#!/bin/busybox sh
+# gts4lv bring-up initramfs: USB network (NCM + RNDIS) and a serial console
+# (ACM) on the gadget, telnet + SSH on 172.16.42.1, DHCP for the host.
+# Nothing here writes to eMMC.
+
+/bin/busybox mkdir -p /bin /sbin /usr/bin /usr/sbin /proc /sys /dev /tmp /run /mnt
+/bin/busybox --install -s
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mkdir -p /dev/pts && mount -t devpts devpts /dev/pts
+mount -t tmpfs tmpfs /tmp
+mount -t tmpfs tmpfs /run
+mount -t configfs configfs /sys/kernel/config
+mount -t pstore pstore /sys/fs/pstore 2>/dev/null
+
+# Boot splash: the red Debian swirl over ABL's screen, kept until Plymouth and GDM
+# take over. The console is on VT1, which fbcon does not drive (fbcon=vc:2-63).
+[ -e /splash.bgra.gz ] && [ -c /dev/fb0 ] && zcat /splash.bgra.gz > /dev/fb0 2>/dev/null
+
+log() { echo "gts4lv-init: $*" > /dev/kmsg; echo "gts4lv-init: $*" > /dev/tty0 2>/dev/null; }
+log "up, kernel $(uname -r)"
+
+IP=172.16.42.1
+G=/sys/kernel/config/usb_gadget/g1
+
+gadget() {
+	mkdir -p $G && cd $G || return 1
+	echo 0x18d1 > idVendor          # same ids postmarketOS uses for its debug shell
+	echo 0xd001 > idProduct
+	mkdir -p strings/0x409
+	echo "Samsung" > strings/0x409/manufacturer
+	echo "gts4lv mainline debug" > strings/0x409/product
+	cat /proc/device-tree/serial-number 2>/dev/null > strings/0x409/serialnumber || echo gts4lv > strings/0x409/serialnumber
+	mkdir -p configs/c.1/strings/0x409
+	echo "NCM+RNDIS+ACM" > configs/c.1/strings/0x409/configuration
+	echo 500 > configs/c.1/MaxPower
+	for f in ncm.usb0 rndis.usb0 acm.usb0; do
+		mkdir -p functions/$f && ln -s functions/$f configs/c.1/ 2>/dev/null
+	done
+	cd /
+}
+
+bind_udc() {
+	for i in $(seq 60); do
+		UDC=$(ls /sys/class/udc 2>/dev/null | head -n1)
+		[ -n "$UDC" ] && break
+		sleep 1
+	done
+	if [ -z "$UDC" ]; then log "no UDC after 60 s"; return 1; fi
+	echo "$UDC" > $G/UDC && log "gadget bound to $UDC"
+}
+
+gadget && bind_udc
+
+# SM5705 MUIC is in manual-switch mode (CTRL bit 2 = 0) with MANSW1 open, so
+# D+/D- never reach the SoC. Route both to USB (D- [7:5]=001, D+ [4:2]=001).
+muic_bus() {
+	for d in /sys/bus/i2c/devices/i2c-*; do
+		case "$(cat $d/of_node/name 2>/dev/null)" in i2c-charger) basename $d | cut -d- -f2; return;; esac
+	done
+}
+B=$(muic_bus)
+[ -n "$B" ] && i2cset -y $B 0x25 0x13 0x24 && log "muic: MANSW1 <- 0x24 (USB)"
+
+# Both network functions get the same address; the host uses whichever it speaks.
+for n in usb0 usb1; do
+	ip link set $n up 2>/dev/null
+done
+ip addr add $IP/24 dev usb0 2>/dev/null && log "usb0 $IP"
+ip link set lo up
+
+cat > /tmp/udhcpd.conf <<EOF
+start 172.16.42.2
+end 172.16.42.2
+interface usb0
+option subnet 255.255.255.0
+max_leases 1
+lease_file /tmp/udhcpd.leases
+EOF
+touch /tmp/udhcpd.leases
+udhcpd /tmp/udhcpd.conf
+
+telnetd -l /bin/sh -b $IP
+mkdir -p /etc/dropbear
+dropbear -R -B -p $IP:22 && log "ssh root@$IP"
+
+# Serial console on the ACM function, respawned.
+( while true; do
+	[ -c /dev/ttyGS0 ] && setsid sh -c 'exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1'
+	sleep 1
+done ) &
+CONSOLE_LOOP=$!
+
+[ -n "$(ls /sys/fs/pstore 2>/dev/null)" ] && log "pstore has records: /sys/fs/pstore"
+log "ready"
+
+# --- Mobian ---------------------------------------------------------------
+# Its rootfs is /data/lost+found/mobian/rootfs.img on Android's userdata (that
+# directory is never encrypted). dm-linear maps the file's extents, so /data
+# itself is never mounted here. Boot it unless:
+#   - the command line has gts4lv.stay (U-Boot's "rescue shell" entry), or
+#   - the previous boot switched to Mobian and never reported GTS4LV-MOBIAN-OK
+#     (pstore), so a broken rootfs cannot loop.
+part() {
+	for u in /sys/class/block/*/uevent; do
+		grep -qx "PARTNAME=$1" "$u" && { echo /dev/$(basename $(dirname $u)); return; }
+	done
+}
+mobian() {
+	# userdata can show up a moment after this runs; dmlinear without it fails.
+	i=0; while [ -z "$(part userdata)" ] && [ $i -lt 10 ]; do sleep 1; i=$((i+1)); done
+	[ -b /dev/dm-0 ] || dmlinear mobian $(part userdata) /etc/rootfs-extents.txt > /run/mobian.dev || {
+		log "mobian: dmlinear failed (userdata: '$(part userdata)')"; return 1; }
+	mkdir -p /mnt/root
+	mount -t ext4 -o rw,noatime /dev/dm-0 /mnt/root 2>/dev/null || { log "mobian: no filesystem on dm-0"; return 1; }
+	[ -x /mnt/root/lib/systemd/systemd ] || { log "mobian: rootfs has no systemd"; umount /mnt/root; return 1; }
+	if grep -qs GTS4LV-SWITCHROOT /sys/fs/pstore/* && ! grep -qs GTS4LV-MOBIAN-OK /sys/fs/pstore/*; then
+		log "mobian: the last boot into it never came up (pstore), staying here"
+		umount /mnt/root; return 1
+	fi
+	# No wait: the rescue shell is asked for up front, from U-Boot's menu (Volume Down at power-on).
+	grep -qw gts4lv.stay /proc/cmdline && { log "mobian: staying (gts4lv.stay)"; umount /mnt/root; return 1; }
+	log "GTS4LV-SWITCHROOT"
+	# switch_root deletes this initramfs, sleep included: a loop left running
+	# would spin on "sleep: not found" for the whole Mobian session.
+	kill $CONSOLE_LOOP 2>/dev/null
+	killall dropbear telnetd udhcpd 2>/dev/null
+	for m in /dev /proc /sys /run; do mount --move $m /mnt/root$m 2>/dev/null; done
+	exec switch_root /mnt/root /lib/systemd/systemd
+}
+mobian
+
+# Staying here: show the log on VT2, the first VT fbcon draws.
+chvt 2 2>/dev/null
+log "staying in the initramfs (console on VT2)"
+
+# Wi-Fi, if this DT has the modem + WCN3990 nodes; logs to /dev/kmsg.
+wifi-up > /run/wifi-up.log 2>&1 &
+
+# Bring-up diagnostics on the screen every 5 s: USB controller state, the
+# MUIC switch GPIO and the SM5705 MUIC's registers (bus "i2c-charger", 0x25).
+mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
+( while true; do
+	U=$(cat /sys/class/udc/*/state 2>/dev/null) S=$(cat /sys/class/udc/*/current_speed 2>/dev/null)
+	G=$(grep -E "gpio98[ :]" /sys/kernel/debug/gpio 2>/dev/null | tr -s ' ' | cut -c1-40)
+	R=""; [ -n "$B" ] && for r in 2 9 10 11 12 19 20 23 27; do R="$R $(i2cget -y $B 0x25 $r 2>/dev/null | cut -c3-4)"; done
+	log "diag udc=$U/$S g98=[$G] muic(i2c-$B) 02,09,0a,0b,0c,13,14,17,1b:$R"
+	sleep 5
+done ) &
+
+# Unattended testing: if no host has configured the gadget after 180 s, reboot
+# once (the console is in ramoops, readable from the next boot's pstore). A
+# marker in the previous boot's pstore stops a second reboot, so this cannot loop.
+( sleep 180
+  [ "$(cat /sys/class/udc/*/state 2>/dev/null)" = configured ] && exit 0
+  grep -qs GTS4LV-AUTOREBOOT /sys/fs/pstore/* && { log "autoreboot: already done once, staying up"; exit 0; }
+  log "GTS4LV-AUTOREBOOT: no USB host after 180 s, rebooting"
+  sync; sleep 2; reboot -f ) &
+
+# A hang resets the SoC instead of waiting for someone to hold Power.
+[ -e /dev/watchdog ] && watchdog -T 30 -t 5 /dev/watchdog && log "watchdog armed (30 s)"
+
+# PID 1 must never exit.
+while true; do sleep 3600; done

@@ -1,0 +1,28 @@
+#!/bin/sh
+# The ADSP's sensor PD (SSC) reads its firmware, sensor configs and registry
+# through hexagonrpcd. They are the device's own: the DSP libraries from the dsp
+# partition, the configs from vendor, the registry from persist. Copied once,
+# read-only from Android's side, so no Android partition is ever written.
+set -u
+part() { for u in /sys/class/block/*/uevent; do
+	grep -qx "PARTNAME=$1" "$u" && { echo /dev/$(basename $(dirname $u)); return; }; done; }
+B=/usr/share/qcom/sdm670/Samsung/gts4lvwifi
+P=/var/lib/hexagonrpc/gts4lv/persist
+mkdir -p $B/dsp $B/sensors/config $P /run/gts4lv/sns
+if [ ! -d $B/dsp/adsp ]; then
+	mount -t ext4 -o ro,noload "$(part dsp)" /run/gts4lv/sns && cp -a /run/gts4lv/sns/. $B/dsp/
+	umount /run/gts4lv/sns
+fi
+if ! ls $B/sensors/config/*.json >/dev/null 2>&1; then
+	mount -t ext4 -o ro,noload "$(part vendor)" /run/gts4lv/sns && cp -a /run/gts4lv/sns/etc/sensors/config/. $B/sensors/config/
+	umount /run/gts4lv/sns
+fi
+# The registry must mirror persist's sensors/registry exactly (sns_reg_config,
+# config/, registry/); debugfs reads it without mounting.
+if [ ! -f $P/sns_reg_config ]; then
+	debugfs -R "rdump /sensors/registry /run/gts4lv/sns" "$(part persist)" >/dev/null 2>&1 &&
+		cp -a /run/gts4lv/sns/registry/. $P/
+	rm -rf /run/gts4lv/sns/registry
+fi
+ln -sfn $P $B/sensors/persist
+chown -R fastrpc:fastrpc /var/lib/hexagonrpc

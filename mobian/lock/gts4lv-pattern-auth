@@ -1,0 +1,47 @@
+#!/usr/bin/python3 -I
+# PAM (pam_exec expose_authtok, "auth sufficient", ahead of pam_unix in gdm-password): succeeds when the
+# token is the user's pattern (dots 1-9 in order) and their lock type is "pattern". Anything else fails,
+# and PAM goes on to the password. Five wrong patterns refuse the pattern for 30 s, as on Android.
+import hashlib, hmac, json, os, sys, time
+
+DIR, RUN = "/var/lib/gts4lv-lock", "/run/gts4lv-lock"
+MAX_FAILS, LOCKOUT_S = 5, 30
+
+
+def main():
+    user = os.environ.get("PAM_USER", "")
+    if not user or "/" in user or user.startswith("."):
+        return 1
+    token = sys.stdin.buffer.read().split(b"\0")[0].decode(errors="replace").strip()
+    try:
+        with open(f"{DIR}/{user}") as f:
+            conf = json.load(f)
+    except (OSError, ValueError):
+        return 1
+    if conf.get("type") != "pattern" or not conf.get("hash"):
+        return 1
+    if not (4 <= len(token) <= 9 and set(token) <= set("123456789") and len(set(token)) == len(token)):
+        return 1    # not a pattern at all: the password's turn, not a failed pattern
+
+    os.makedirs(RUN, mode=0o700, exist_ok=True)
+    fails_path = f"{RUN}/{user}"
+    try:
+        with open(fails_path) as f:
+            fails, last = json.load(f)
+    except (OSError, ValueError):
+        fails, last = 0, 0
+    if fails >= MAX_FAILS and time.time() - last < LOCKOUT_S:
+        return 1
+    digest = hashlib.sha256((conf["salt"] + token).encode()).hexdigest()
+    if hmac.compare_digest(digest, conf["hash"]):
+        try:
+            os.unlink(fails_path)
+        except OSError:
+            pass
+        return 0
+    with open(fails_path, "w") as f:
+        json.dump([0 if fails >= MAX_FAILS else fails + 1, time.time()], f)
+    return 1
+
+
+sys.exit(main())

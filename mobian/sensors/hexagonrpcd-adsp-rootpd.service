@@ -1,0 +1,15 @@
+[Unit]
+Description=FastRPC server for the Qualcomm ADSP - rootpd (Galaxy Tab S5e)
+# started when /dev/fastrpc-adsp appears (udev rule), so it never runs before the ADSP is up
+BindsTo=dev-fastrpc\x2dadsp.device
+After=dev-fastrpc\x2dadsp.device
+
+[Service]
+ExecStart=/usr/local/bin/hexagonrpcd -f /dev/fastrpc-adsp -d adsp -R /usr/share/qcom/sdm670/Samsung/gts4lvwifi
+Restart=always
+RestartSec=3
+User=fastrpc
+Group=fastrpc
+
+[Install]
+WantedBy=multi-user.target

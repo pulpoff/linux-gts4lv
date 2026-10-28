@@ -1,0 +1,15 @@
+--- /tmp/u.orig	2026-10-27 17:44:23.055984655 +0100
++++ libcamera-utils.cpp	2026-10-27 17:44:23.101427131 +0100
+@@ -165,9 +165,9 @@
+ 			munmap(SPA_PTROFF(b->ptr, -d[0].mapoffset, void),
+ 					d[0].maxsize - d[0].mapoffset);
+ 		}
+-		if (SPA_FLAG_IS_SET(b->flags, BUFFER_FLAG_ALLOCATED)) {
+-			close(d[0].fd);
+-		}
++		/* The fds belong to libcamera FrameBuffers (SharedFD), which close them in
++		 * freeBuffers() below. Closing them here as well let libcamera close whatever
++		 * reused the number in between: a restarted stream then stalled for good. */
+ 		d[0].type = SPA_ID_INVALID;
+ 	}
+ 

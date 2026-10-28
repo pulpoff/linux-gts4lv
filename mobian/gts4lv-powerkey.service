@@ -1,0 +1,13 @@
+[Unit]
+Description=Power key blanks (and locks) the screen
+# It grabs gts4lv-touchd's double-tap device, which a touchd restart recreates.
+After=gts4lv-touchd.service
+PartOf=gts4lv-touchd.service
+
+[Service]
+ExecStart=/usr/local/sbin/gts4lv-powerkey
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical.target

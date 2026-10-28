@@ -1,0 +1,99 @@
+#!/usr/bin/python3
+# Auto-rotation for the Tab S5e when mutter will not do it. Mutter rotates the built-in panel only in
+# "touch mode", which it drops as soon as a pointer has been seen (a Bluetooth keyboard with a
+# touchpad, a mouse) and, after a removal, does not always get back. A tablet should rotate either way.
+#
+# This follows iio-sensor-proxy's accelerometer orientation and applies the matching transform through
+# org.gnome.Mutter.DisplayConfig, but only while mutter reports PanelOrientationManaged = false; while
+# it is true mutter rotates by itself and this stays out of the way. The orientation lock
+# (org.gnome.settings-daemon.peripherals.touchscreen orientation-lock) is honoured.
+import gi
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib
+
+# iio-sensor-proxy orientation -> mutter transform (as mutter's own orientation manager maps them)
+TRANSFORMS = {"normal": 0, "left-up": 1, "bottom-up": 2, "right-up": 3}
+
+bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+sysbus = Gio.bus_get_sync(Gio.BusType.SYSTEM)
+settings = Gio.Settings.new("org.gnome.settings-daemon.peripherals.touchscreen")
+
+
+def log(*a):
+    print(*a, flush=True)
+
+
+def display(method, args=None, reply=None):
+    return bus.call_sync("org.gnome.Mutter.DisplayConfig", "/org/gnome/Mutter/DisplayConfig",
+                         "org.gnome.Mutter.DisplayConfig", method, args,
+                         GLib.VariantType(reply) if reply else None, Gio.DBusCallFlags.NONE, 5000, None)
+
+
+def mutter_manages():
+    v = bus.call_sync("org.gnome.Mutter.DisplayConfig", "/org/gnome/Mutter/DisplayConfig",
+                      "org.freedesktop.DBus.Properties", "Get",
+                      GLib.Variant("(ss)", ("org.gnome.Mutter.DisplayConfig", "PanelOrientationManaged")),
+                      GLib.VariantType("(v)"), Gio.DBusCallFlags.NONE, 5000, None)
+    return v.unpack()[0]
+
+
+def apply(transform):
+    serial, monitors, logical, _ = display("GetCurrentState").unpack()
+    builtin = {m[0][0] for m in monitors if m[2].get("is-builtin")}
+    current = {m[0][0]: next((mode[0] for mode in m[1] if mode[6].get("is-current")), None) for m in monitors}
+    out, changed = [], False
+    for x, y, scale, tr, primary, mons, _props in logical:
+        connectors = [m[0] for m in mons]
+        if any(c in builtin for c in connectors) and tr != transform:
+            tr, changed = transform, True
+        out.append((x, y, scale, tr, primary, [(c, current[c], {}) for c in connectors]))
+    if not changed:
+        return
+    # method 1: temporary, like mutter's own rotation (not written to monitors.xml)
+    display("ApplyMonitorsConfig", GLib.Variant("(uua(iiduba(ssa{sv}))a{sv})", (serial, 1, out, {})))
+    log("rotated to", transform)
+
+
+proxy = Gio.DBusProxy.new_sync(sysbus, Gio.DBusProxyFlags.NONE, None, "net.hadess.SensorProxy",
+                               "/net/hadess/SensorProxy", "net.hadess.SensorProxy", None)
+claimed = False
+
+
+def sync(*_):
+    global claimed
+    want = not settings.get_boolean("orientation-lock") and proxy.get_name_owner() is not None
+    try:
+        want = want and not mutter_manages()
+    except GLib.Error as e:
+        log("mutter:", e.message)
+        want = False
+    if want and not claimed:
+        try:
+            proxy.call_sync("ClaimAccelerometer", None, Gio.DBusCallFlags.NONE, 5000, None)
+            claimed = True
+        except GLib.Error as e:
+            log("claim:", e.message)
+    elif not want and claimed:
+        try:
+            proxy.call_sync("ReleaseAccelerometer", None, Gio.DBusCallFlags.NONE, 5000, None)
+        except GLib.Error:
+            pass
+        claimed = False
+    if claimed:
+        o = proxy.get_cached_property("AccelerometerOrientation")
+        o = o.unpack() if o else "undefined"
+        if o in TRANSFORMS:
+            try:
+                apply(TRANSFORMS[o])
+            except GLib.Error as e:
+                log("apply:", e.message)
+
+
+proxy.connect("g-properties-changed", sync)
+proxy.connect("notify::g-name-owner", sync)
+settings.connect("changed::orientation-lock", sync)
+bus.signal_subscribe("org.gnome.Mutter.DisplayConfig", "org.freedesktop.DBus.Properties",
+                     "PropertiesChanged", "/org/gnome/Mutter/DisplayConfig", None,
+                     Gio.DBusSignalFlags.NONE, lambda *a: sync())
+sync()
+GLib.MainLoop().run()

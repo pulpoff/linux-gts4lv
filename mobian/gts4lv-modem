@@ -1,0 +1,44 @@
+#!/bin/sh
+# Start the modem DSP for Wi-Fi: firmware from Android's modem/apnhlos/vendor
+# partitions (mounted read-only), rmtfs on RAM copies of the modem's storage, so
+# no Android partition is ever written.
+set -u
+part() { for u in /sys/class/block/*/uevent; do
+	grep -qx "PARTNAME=$1" "$u" && { echo /dev/$(basename $(dirname $u)); return; }; done; }
+
+FW=/run/gts4lv-fw
+mkdir -p /run/gts4lv/modem /run/gts4lv/apnhlos /run/gts4lv/vendor $FW/qcom/sdm670/gts4lv $FW/ath10k/WCN3990/hw1.0 $FW/qca
+mountpoint -q /run/gts4lv/modem || mount -t vfat -o ro "$(part modem)" /run/gts4lv/modem
+mountpoint -q /run/gts4lv/apnhlos || mount -t vfat -o ro "$(part apnhlos)" /run/gts4lv/apnhlos
+mountpoint -q /run/gts4lv/vendor || mount -t ext4 -o ro,noload "$(part vendor)" /run/gts4lv/vendor
+for f in /run/gts4lv/modem/image/* /run/gts4lv/apnhlos/image/* /run/gts4lv/vendor/firmware/*; do
+	ln -sf "$f" $FW/qcom/sdm670/gts4lv/
+	ln -sf "$f" $FW/
+done
+# ath10k's board data: Samsung's default bdwlan.bin (the chip reports board_id 0xff).
+ln -sf $FW/bdwlan.bin $FW/ath10k/WCN3990/hw1.0/board.bin
+# Bluetooth (WCN3990 behind uart6): btqca asks for qca/crbtfw21.tlv + crnv21.bin.
+ln -sf $FW/crbtfw21.tlv $FW/crnv21.bin $FW/qca/
+echo -n $FW > /sys/module/firmware_class/parameters/path
+# hci_uart is blacklisted so it does not ask for that firmware before the path is set.
+modprobe hci_uart
+# Same for the video codec: venus loads its firmware in probe, and fails for good
+# if that runs before the path is set.
+modprobe venus_core
+
+mkdir -p /run/gts4lv/efs
+for p in modemst1 modemst2 fsg fsc; do
+	[ -f /run/gts4lv/efs/$p ] || dd if="$(part $p)" of=/run/gts4lv/efs/$p bs=1M 2>/dev/null
+done
+ln -sf modemst1 /run/gts4lv/efs/modem_fs1; ln -sf modemst2 /run/gts4lv/efs/modem_fs2
+ln -sf fsg /run/gts4lv/efs/modem_fsg; ln -sf fsc /run/gts4lv/efs/modem_fsc
+
+pidof rmtfs >/dev/null || { rmtfs -r -o /run/gts4lv/efs -v > /run/gts4lv/rmtfs.log 2>&1 & }
+pidof tqftpserv >/dev/null || { tqftpserv > /run/gts4lv/tqftpserv.log 2>&1 & }
+sleep 1
+# Only the modem; the ADSP (audio) is gts4lv-audio, after GDM.
+for r in /sys/class/remoteproc/remoteproc*; do
+	case "$(cat $r/name)" in *4080000.remoteproc*|*mss*|*modem*) ;; *) continue ;; esac
+	[ "$(cat $r/state)" = offline ] && echo start > $r/state
+	echo "$(cat $r/name): $(cat $r/state)"
+done

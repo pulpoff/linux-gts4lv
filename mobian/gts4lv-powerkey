@@ -1,0 +1,541 @@
+#!/usr/bin/python3
+# Power key → blank the screen, like a phone: logged in it also locks (GNOME's
+# screensaver = lock + blank), in GDM it only blanks. Pressed again while blank,
+# it wakes the screen (to the lock screen). logind ignores the key and GNOME has
+# no "blank" action for it, so this asks the active session's shell directly.
+# A book cover (the hall sensor, SW_LID on gpio-keys) does the same: closing it
+# blanks (and locks), opening it wakes the screen.
+# Volume keys follow the screen, as on Android: the daemon takes the two buttons
+# and re-sends them through a virtual device, swapped where the screen's
+# rotation puts volume-up below or left of volume-down.
+import os, re, signal, struct, subprocess, glob, select, threading, time
+import evdev
+from evdev import ecodes
+
+EV_KEY, KEY_POWER, KEY_SCREENLOCK = 1, 116, 152
+# GDM's greeter runs as Debian-gdm up to GDM 48, as gdm-greeter from GDM 51: no
+# screensaver there, blanking only.
+GREETERS = {"Debian-gdm", "gdm-greeter"}
+EV_SW, SW_LID = 5, 0
+FMT = "llHHi"
+
+
+def find_device(name):
+    for d in glob.glob("/sys/class/input/event*"):
+        try:
+            if open(d + "/device/name").read().strip() == name:
+                return "/dev/input/" + os.path.basename(d)
+        except OSError:
+            pass
+    return None
+
+
+def active_session_user():
+    """User of the active graphical session on seat0 (gdm's greeter included)."""
+    out = subprocess.run(["loginctl", "list-sessions", "--no-legend"],
+                         capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        sid = line.split()[0]
+        p = subprocess.run(["loginctl", "show-session", sid, "-p", "Seat", "-p", "Active",
+                            "-p", "Type", "-p", "Name", "-p", "User"],
+                           capture_output=True, text=True).stdout
+        v = dict(l.split("=", 1) for l in p.splitlines() if "=" in l)
+        if v.get("Seat") == "seat0" and v.get("Active") == "yes" and v.get("Type") in ("wayland", "x11"):
+            return v["Name"], v["User"]
+    return None
+
+
+def shell_bus(uid):
+    """The session bus of the user's gnome-shell: GDM runs the greeter's on a
+    private bus (dbus-run-session), not on /run/user/UID/bus."""
+    for p in glob.glob("/proc/[0-9]*"):
+        try:
+            if open(p + "/comm").read().strip() != "gnome-shell" or os.stat(p).st_uid != int(uid):
+                continue
+            for e in open(p + "/environ", "rb").read().split(b"\0"):
+                if e.startswith(b"DBUS_SESSION_BUS_ADDRESS="):
+                    return e.split(b"=", 1)[1].decode()
+        except OSError:
+            pass
+    return f"unix:path=/run/user/{uid}/bus"
+
+
+def log(*a):
+    print(f"{time.monotonic():.3f}", *a, flush=True)
+
+
+def session_call(user, uid, *args):
+    env = {"DBUS_SESSION_BUS_ADDRESS": shell_bus(uid), "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}
+    r = subprocess.run(["runuser", "-u", user, "--", *args],
+                       env=env, capture_output=True, text=True, timeout=5)
+    if r.returncode:
+        log("call failed:", " ".join(args[-3:]), r.stderr.strip()[:200])
+    return r.stdout
+
+
+def screensaver(user, uid, method, *args):
+    return session_call(user, uid, "gdbus", "call", "--session", "--dest", "org.gnome.ScreenSaver",
+                        "--object-path", "/org/gnome/ScreenSaver",
+                        "--method", "org.gnome.ScreenSaver." + method, *args)
+
+
+def screensaver_async(user, uid, method):
+    env = {"DBUS_SESSION_BUS_ADDRESS": shell_bus(uid), "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}
+    subprocess.Popen(["timeout", "30", "runuser", "-u", user, "--", "gdbus", "call", "--session",
+                      "--dest", "org.gnome.ScreenSaver", "--object-path", "/org/gnome/ScreenSaver",
+                      "--method", "org.gnome.ScreenSaver." + method],
+                     env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+DC = ["org.gnome.Mutter.DisplayConfig", "/org/gnome/Mutter/DisplayConfig", "org.gnome.Mutter.DisplayConfig"]
+
+
+def set_blank(user, uid, blank):
+    """The greeter's shell has no screensaver service; blank through mutter.
+    Set, never toggle: SimulateUserActivity wakes the panel by itself, and a
+    toggle that re-read the mode after it switched the screen straight off."""
+    new = "3" if blank else "0"
+    session_call(user, uid, "gdbus", "call", "--session", "--dest", DC[0], "--object-path", DC[1],
+                 "--method", "org.freedesktop.DBus.Properties.Set", DC[2], "PowerSaveMode", f"<int32 {new}>")
+
+
+# Off and on fade over half a second, like a phone: the backlight is ramped
+# here (the panel driver smooths each step) and put back exactly as it was, so
+# GNOME's own brightness stays right.
+BL = (glob.glob("/sys/class/backlight/*/brightness") or [None])[0]
+FADE_S, FADE_STEPS = 0.5, 15
+# The level to fade back to. Kept in a file: a restart while the panel sat at
+# the fade's 1 once read 1 as the user's level and restored "on" as near black.
+LEVEL_FILE, DEFAULT_LEVEL = "/run/gts4lv-powerkey.level", 128
+
+
+def load_level():
+    try:
+        v = int(open(LEVEL_FILE).read())
+        return v if v > 1 else None
+    except (OSError, ValueError):
+        return None
+
+
+def save_level(v):
+    global saved_level
+    saved_level = v
+    try:
+        with open(LEVEL_FILE, "w") as f:
+            f.write(str(v))
+    except OSError:
+        pass
+
+
+saved_level = load_level()
+
+
+def bl_get():
+    try:
+        return int(open(BL).read())
+    except (TypeError, OSError, ValueError):
+        return None
+
+
+def bl_set(v):
+    try:
+        with open(BL, "w") as f:
+            f.write(str(v))
+        return True
+    except (TypeError, OSError):
+        return False
+
+
+def ramp(a, b):
+    for i in range(1, FADE_STEPS + 1):
+        bl_set(round(a + (b - a) * i / FADE_STEPS))
+        time.sleep(FADE_S / FADE_STEPS)
+
+
+def fade_in(level):
+    # The panel takes commands ~0.8 s after the unblank; until then a write
+    # fails (EINVAL) and must not be sent at all.
+    end = time.monotonic() + 3
+    while not bl_set(1) and time.monotonic() < end:
+        time.sleep(0.05)
+    ramp(1, level)
+
+
+# A press and the power save monitor both fade the panel; one at a time. Reentrant:
+# the SIGUSR1 handler runs pressed() on the main thread.
+busy = threading.RLock()
+
+
+def is_blank(user, uid):
+    """The panel is off (mutter power save), in the greeter and in a session alike."""
+    mode = session_call(user, uid, "gdbus", "call", "--session", "--dest", DC[0], "--object-path", DC[1],
+                        "--method", "org.freedesktop.DBus.Properties.Get", DC[2], "PowerSaveMode")
+    return "<0>" not in mode
+
+
+def touch_lpm(on):
+    """Off: the touch controller goes to low power with double tap armed
+    (gts4lv-touchd, SIGUSR1); on: back to normal sensing (SIGUSR2)."""
+    subprocess.run(["pkill", "-x", "-USR1" if on else "-USR2", "gts4lv-touchd"])
+
+
+# When the last press was done (CLOCK_REALTIME, like the event timestamps). A press takes up to a
+# second (fade, lock, DPMS); one made meanwhile waited in the queue and then toggled the panel again,
+# so a quick second press, or one made while the panel was slow to show, left the screen off.
+press_done = 0.0
+
+
+# System sleep (s2idle): once the panel has been off for SLEEP_AFTER s on battery, the radios and the
+# ADSP's sensor clients go down, touch stops sensing, and only the power key (or a charger) wakes the
+# tablet. Woken by anything else with the panel still off, it sleeps again after RESLEEP_AFTER s.
+# Not while audio plays or a logind "sleep" block inhibitor is held.
+SLEEP_AFTER = int(os.environ.get("GTS4LV_SLEEP_AFTER", 120))
+RESLEEP_AFTER = int(os.environ.get("GTS4LV_RESLEEP_AFTER", 10))
+SLEEP_ALARM = int(os.environ.get("GTS4LV_SLEEP_ALARM", 0))	# testing: an RTC wake after this many s
+SLEEP_ON_CHARGER = os.environ.get("GTS4LV_SLEEP_ON_CHARGER") == "1"	# testing over USB
+off_since = None	# monotonic time the panel went off; None while it is on
+CHARGER = "/sys/class/power_supply/sm5705-charger/online"
+# FastRPC servers frozen mid-call crashed the ADSP's sensor process, and its recovery hung the bus
+SLEEP_STOP = ["iio-sensor-proxy", "hexagonrpcd-adsp-sensorspd", "hexagonrpcd-adsp-rootpd"]
+
+
+def panel_off(off):
+    global off_since
+    if not off:
+        off_since = None
+    elif off_since is None:
+        off_since = time.monotonic()
+
+
+def read_int(path, default=0):
+    try:
+        return int(open(path).read())
+    except (OSError, ValueError):
+        return default
+
+
+def pwrkey_irqs():
+    """The power key's interrupt count: its wakeup_count never moves (pm8941-pwrkey reports no
+    wakeup event), the interrupt does, once per press and once per release."""
+    try:
+        for line in open("/proc/interrupts"):
+            if line.rstrip().endswith("pm8941_pwrkey"):
+                return sum(int(f) for f in line.split()[1:] if f.isdigit())
+    except OSError:
+        pass
+    return 0
+
+
+def audio_playing():
+    for f in glob.glob("/proc/asound/card*/pcm*p/sub*/status"):
+        try:
+            if "RUNNING" in open(f).read():
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def sleep_blocked():
+    out = subprocess.run(["systemd-inhibit", "--list", "--no-legend", "--no-pager"],
+                         capture_output=True, text=True).stdout
+    return any(re.search(r"\bsleep\b", l) and l.rstrip().endswith("block") for l in out.splitlines())
+
+
+def sleep_snapshot():
+    """GTS4LV_SLEEP_DEBUG=1: what is still on as the system goes to sleep, in /run/gts4lv-sleep.txt
+    (software counts only: no register reads)."""
+    out = []
+    for c in sorted(glob.glob("/sys/kernel/debug/clk/*/clk_prepare_count")):
+        n = read_int(c)
+        if n:
+            out.append("clk %s %d" % (c.split("/")[-2], n))
+    for r in sorted(glob.glob("/sys/class/regulator/regulator.*")):
+        try:
+            if open(r + "/state").read().strip() == "enabled":
+                out.append("reg %s" % open(r + "/name").read().strip())
+        except OSError:
+            pass
+    try:
+        out += ["pd " + l for l in open("/sys/kernel/debug/pm_genpd/pm_genpd_summary").read().splitlines()
+                if re.match(r"^\S+\s+on\b", l)]
+    except OSError:
+        pass
+    with open("/run/gts4lv-sleep.txt", "w") as f:
+        f.write("\n".join(out) + "\n")
+
+
+def battery():
+    b = "/sys/class/power_supply/sm5705-battery/"
+    return "%d%% %.3f V" % (read_int(b + "capacity"), read_int(b + "voltage_now") / 1e6)
+
+
+def system_sleep():
+    """Radios and sensors down, s2idle, back up. True when the power key woke it."""
+    blocked = []
+    for d in glob.glob("/sys/class/rfkill/rfkill*"):
+        if open(d + "/type").read().strip() in ("wlan", "bluetooth") and read_int(d + "/soft") == 0:
+            blocked.append(d)
+            open(d + "/soft", "w").write("1")
+    subprocess.run(["systemctl", "stop", *SLEEP_STOP])
+    subprocess.run(["pkill", "-x", "-HUP", "gts4lv-touchd"])
+    time.sleep(0.5)
+    if os.environ.get("GTS4LV_SLEEP_DEBUG") == "1":
+        sleep_snapshot()
+    if SLEEP_ALARM:
+        try:
+            open("/sys/class/rtc/rtc0/wakealarm", "w").write("0")
+            open("/sys/class/rtc/rtc0/wakealarm", "w").write("+%d" % SLEEP_ALARM)
+        except OSError as e:
+            log("wakealarm:", e)
+    keys = pwrkey_irqs()
+    log("sleeping; battery", battery(), "radios off:", [os.path.basename(d) for d in blocked])
+    slept = time.time()
+    try:
+        open("/sys/power/state", "w").write("mem")
+    except OSError as e:
+        log("suspend failed:", e)
+    by_key = pwrkey_irqs() > keys
+    log("resumed after %d s" % (time.time() - slept), "by the power key" if by_key else "by something else",
+        "battery", battery())
+    subprocess.run(["pkill", "-x", "-USR1", "gts4lv-touchd"])	# double tap again; a wake turns it on
+    subprocess.run(["systemctl", "start", "--no-block", *reversed(SLEEP_STOP)])
+    for d in blocked:
+        try:
+            open(d + "/soft", "w").write("0")
+        except OSError:
+            pass
+    return by_key
+
+
+def sleeper():
+    global off_since, press_done
+    while True:
+        time.sleep(5)
+        since = off_since
+        if since is None or time.monotonic() - since < SLEEP_AFTER or \
+                (read_int(CHARGER, 1) and not SLEEP_ON_CHARGER):
+            continue
+        if audio_playing() or sleep_blocked():
+            continue
+        with busy:
+            if off_since is None:
+                continue
+            woke = system_sleep()
+            if woke:
+                # The press that woke it is often gone by the time the driver reads the key, and when
+                # it is not, it must not toggle the panel straight back off.
+                _pressed(False)
+                press_done = time.time() + 0.5
+            if off_since is not None:
+                off_since = time.monotonic() - SLEEP_AFTER + RESLEEP_AFTER
+
+
+def pressed(want=None, at=None):
+    """Toggle the panel; want=True/False only blanks/wakes (the cover).
+
+    Blanking in a session also locks (GNOME's screensaver; it only shields if
+    the user turned locking off); waking shows the lock screen. at: the
+    event's timestamp; a press made while the previous one ran is dropped."""
+    global press_done
+    with busy:
+        if at is not None and at < press_done:
+            log("press dropped: made while the previous one ran")
+            return
+        _pressed(want)
+        press_done = time.time()
+
+
+def _pressed(want):
+    global saved_level
+    s = active_session_user()
+    if not s:
+        return
+    user, uid = s
+    try:
+        blank = is_blank(user, uid)
+        locked = user not in GREETERS and "true" in screensaver(user, uid, "GetActive")
+        log("press want", want, "blank", blank, "bl", bl_get(), "saved", saved_level, "locked", locked)
+        if not blank and saved_level and saved_level > 1 and bl_get() == 1:
+            blank = True	# woken behind our back but still at the fade's 1
+        if want is not None and want == blank:
+            return
+        if not blank and user not in GREETERS and not locked:
+            # Lock, not SetActive: activating only locks after the lock delay.
+            # Waited for (briefly) while the panel is still on: the call
+            # returns once the shell's lock animation is done, which it never
+            # is with the panel off, and a lock landing after the blank woke
+            # the panel again (dimmed, so it looked off). Skipped when already
+            # locked: on the lock screen the call never returns, and the press
+            # waited out the timeout (6 s to go off).
+            try:
+                screensaver(user, uid, "Lock")
+            except subprocess.TimeoutExpired:
+                pass
+        if not blank:
+            cur = bl_get()
+            if cur and cur > 1:
+                save_level(cur)
+            if cur:
+                ramp(cur, 1)
+                time.sleep(0.25)	# let the panel driver's own fade land first
+            set_blank(user, uid, True)
+            touch_lpm(True)
+            panel_off(True)
+            # The level stays at 1 while off: a brightness write during the
+            # panel's power-down drew lines and garbage on it.
+        else:
+            level = saved_level or (bl_get() if (bl_get() or 0) > 1 else DEFAULT_LEVEL)
+            touch_lpm(False)
+            set_blank(user, uid, False)
+            # User activity, as mutter's idle monitor sees it: it lifts the black curtain onto the
+            # lock screen (clock, swipe up) and resets the idle timer, so the settings daemon does not
+            # blank the panel again. Not a key: that opens the password prompt. Not SetActive(false):
+            # on a locked shell that unlocks. Not a uinput pointer either: mutter counted it as a mouse
+            # even after it was gone, left touch mode, and auto-rotation went with it.
+            session_call(user, uid, "gdbus", "call", "--session", "--dest", "org.gnome.Mutter.IdleMonitor",
+                         "--object-path", "/org/gnome/Mutter/IdleMonitor/Core",
+                         "--method", "org.gnome.Mutter.IdleMonitor.ResetIdletime")
+            if level:
+                fade_in(level)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+# Mutter transforms (counter-clockwise) where the buttons read reversed. In the
+# panel's own landscape (0) volume-up is the left one; 180 mirrors that back,
+# and of the portraits, 270 puts volume-up at the bottom.
+SWAP_TRANSFORMS = {0, 270}
+
+
+def screen_transform():
+    s = active_session_user()
+    if not s:
+        return 0
+    user, uid = s
+    try:
+        out = session_call(user, uid, "gdbus", "call", "--session", "--dest", DC[0], "--object-path",
+                           DC[1], "--method", DC[2] + ".GetCurrentState")
+    except subprocess.TimeoutExpired:
+        return 0
+    m = re.search(r"\[\(-?\d+, -?\d+, [\d.]+, uint32 (\d+), true", out)
+    return int(m.group(1)) if m else 0
+
+
+VOL_SWAP = {ecodes.KEY_VOLUMEUP: ecodes.KEY_VOLUMEDOWN, ecodes.KEY_VOLUMEDOWN: ecodes.KEY_VOLUMEUP}
+held = {}	# physical key -> code sent at press, so release and repeat match it
+
+size = struct.calcsize(FMT)
+# The power key is grabbed too: GNOME seeing it switched the panel back on by
+# itself (any input ends power save), so the daemon read it as on and blanked
+# it again.
+pwr = find_device("pm8941_pwrkey")
+pwr_dev = evdev.InputDevice(pwr) if pwr else None
+if pwr_dev:
+    pwr_dev.grab()
+fds = {pwr_dev.fd: False} if pwr_dev else {}
+# Volume buttons and the cover switch (gpio-keys): grabbed, so only this fd sees
+# them, and sent on through uinput.
+vol = [evdev.InputDevice(d) for d in (find_device("gpio-keys"), find_device("pm8941_resin")) if d]
+# gts4lv-touchd's double-tap device: KEY_WAKEUP wakes the screen here (grabbed,
+# so GNOME does not wake the panel on its own behind the fade).
+tap = find_device("gts4lv double tap")
+if tap:
+    tap_dev = evdev.InputDevice(tap)
+    tap_dev.grab()
+    fds[tap_dev.fd] = False
+for d in vol:
+    d.grab()
+    fds[d.fd] = True
+if not fds:
+    raise SystemExit("no input devices")
+ui = evdev.UInput({ecodes.EV_KEY: [ecodes.KEY_VOLUMEUP, ecodes.KEY_VOLUMEDOWN],
+                   ecodes.EV_SW: [ecodes.SW_LID]}, name="gts4lv volume keys")
+def seat_active():
+    """seat0's active session id, from logind's state file (a read, no runuser)."""
+    try:
+        for line in open("/run/systemd/seats/seat0"):
+            if line.startswith("ACTIVE="):
+                return line.strip()
+    except OSError:
+        pass
+    return None
+
+
+def watch_seat(p, active):
+    """Ends the monitor once seat0 switches session (your session <-> GDM's greeter):
+    the old shell's PowerSaveMode no longer says anything about the panel, and
+    it had disarmed double tap on the login screen."""
+    while p.poll() is None:
+        time.sleep(2)
+        if seat_active() != active:
+            p.terminate()
+            return
+
+
+def watch_power_save():
+    """The panel also goes off without us: GNOME blanks an idle lock screen
+    after 15 s. Follow mutter's PowerSaveMode, so double tap is armed whenever
+    the panel is off (one long-lived monitor, not a poll: a runuser per poll
+    made the UI choppy)."""
+    while True:
+        active = seat_active()
+        s = active_session_user()
+        if not s:
+            time.sleep(5)
+            continue
+        user, uid = s
+        log("power save monitor on", user, active)
+        env = {"DBUS_SESSION_BUS_ADDRESS": shell_bus(uid), "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}
+        p = subprocess.Popen(["runuser", "-u", user, "--", "gdbus", "monitor", "--session",
+                              "--dest", DC[0], "--object-path", DC[1]],
+                             env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        threading.Thread(target=watch_seat, args=(p, active), daemon=True).start()
+        for line in p.stdout:
+            m = re.search(r"'PowerSaveMode': <(\d+)>", line)
+            if m:
+                log("power save mode", m.group(1))
+                touch_lpm(m.group(1) != "0")
+                panel_off(m.group(1) != "0")
+                if m.group(1) == "0":
+                    with busy:
+                        if bl_get() == 1 and saved_level:
+                            # Woken by other input (a Bluetooth keyboard
+                            # or mouse): mutter switched the panel on, but
+                            # the backlight is still at the fade's 1.
+                            fade_in(saved_level)
+        p.wait()
+        time.sleep(2)
+
+
+threading.Thread(target=watch_power_save, daemon=True).start()
+threading.Thread(target=sleeper, daemon=True).start()
+
+# SIGUSR1 = a power key press, for testing over ssh (a grabbed device takes
+# no injected events).
+signal.signal(signal.SIGUSR1, lambda *_: pressed())
+while True:
+    for fd in select.select(list(fds), [], [])[0]:
+        sec, usec, typ, code, value = struct.unpack(FMT, os.read(fd, size))
+        at = sec + usec / 1e6
+        if fds[fd]:
+            if typ == EV_KEY and code in VOL_SWAP:
+                if value == 1:
+                    held[code] = VOL_SWAP[code] if screen_transform() in SWAP_TRANSFORMS else code
+                ui.write(EV_KEY, held.get(code, code), value)
+                if value == 0:
+                    held.pop(code, None)
+            elif typ == EV_SW:
+                ui.write(EV_SW, code, value)
+            elif typ == 0:
+                ui.syn()
+        if typ == EV_KEY and code == KEY_POWER and value == 1:
+            pressed(at=at)
+        elif typ == EV_KEY and code == ecodes.KEY_WAKEUP and value == 1:
+            pressed(want=False)	# double tap: wake only
+        elif typ == EV_KEY and code == KEY_SCREENLOCK and value == 1:
+            # The DT sends KEY_SCREENLOCK. GNOME's own handling of it (lock,
+            # if locking is on) does not switch the panel off, so do it all here.
+            pressed(at=at)
+        elif typ == EV_SW and code == SW_LID:
+            pressed(want=bool(value))

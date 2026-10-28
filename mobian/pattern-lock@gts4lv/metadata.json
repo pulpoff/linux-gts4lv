@@ -1,0 +1,7 @@
+{
+  "uuid": "pattern-lock@gts4lv",
+  "name": "Lock type: pattern, password or swipe",
+  "description": "Unlock by drawing a pattern on a 3x3 dot grid, as on Android, by typing the password, or by a swipe, on the lock screen and the login screen. The pattern is its own secret, set in the preferences; the password always works too.",
+  "shell-version": ["48", "49", "50", "51"],
+  "session-modes": ["user", "unlock-dialog", "gdm"]
+}

@@ -1,0 +1,17 @@
+[Unit]
+Description=Stop the boot splash once GNOME Shell owns the display
+# GDM here never quits Plymouth after an autologin: a plymouthd left running takes the panel back
+# at the next power-key unblank, and GDM then starts a greeter on tty1 over the session.
+After=gdm.service plymouth-start.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# the session's Wayland socket appears right after mutter took the DRM device (17.95 s → 18.2 s);
+# give up after 60 s and quit anyway so plymouthd never outlives a broken session start
+# (plymouthd here writes no /run/plymouth/pid, so ask it over its socket instead)
+ExecCondition=/usr/bin/plymouth --ping
+ExecStart=/bin/sh -c 'for i in $(seq 240); do ls /run/user/*/wayland-0 >/dev/null 2>&1 && break; sleep 0.25; done; exec /usr/bin/plymouth quit --retain-splash'
+
+[Install]
+WantedBy=graphical.target

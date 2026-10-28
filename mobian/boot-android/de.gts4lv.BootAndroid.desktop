@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Android
+Comment=Restart into LineageOS
+Keywords=android;lineageos;restart;reboot;boot;
+Exec=/usr/local/bin/gts4lv-boot-android-app
+Icon=de.gts4lv.BootAndroid
+Categories=System;
+StartupNotify=true

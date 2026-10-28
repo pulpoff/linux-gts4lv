@@ -1,0 +1,6 @@
+# Accelerometer, ambient light and compass sit behind the ADSP's sensor core
+# (SSC); iio-sensor-proxy reaches them through libssc on the fastrpc node.
+# The firmware gives an all-zero mount matrix (libssc falls back to identity).
+# Upright in the panel's native landscape the LSM6DSM reads +1g on X, and
+# iio-sensor-proxy wants -1g on Y there: display x = sensor y, display y = -sensor x.
+SUBSYSTEM=="misc", KERNEL=="fastrpc-adsp*", ENV{IIO_SENSOR_PROXY_TYPE}+="ssc-accel ssc-light ssc-compass", ENV{ACCEL_MOUNT_MATRIX}="0, 1, 0; -1, 0, 0; 0, 0, 1"

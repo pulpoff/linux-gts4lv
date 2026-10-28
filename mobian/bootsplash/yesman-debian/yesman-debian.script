@@ -1,0 +1,11 @@
+# Galaxy Tab S5e: the picture the initramfs already wrote to /dev/fb0 (splash.bgra.gz,
+# 2560x1600), so the boot shows one still image from ABL's Samsung screen to GDM.
+# Pixel for pixel only with DeviceScale=1 (plymouthd.conf).
+Window.SetBackgroundTopColor(0, 0, 0);
+Window.SetBackgroundBottomColor(0, 0, 0);
+
+screen = Image("boot.png");
+if (screen.GetWidth() != Window.GetWidth() || screen.GetHeight() != Window.GetHeight())
+    screen = screen.Scale(Window.GetWidth(), Window.GetHeight());
+global.sprite = Sprite(screen);
+sprite.SetPosition(Window.GetX(), Window.GetY(), 0);

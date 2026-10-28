@@ -1,0 +1,11 @@
+[Unit]
+Description=Wake the Tab S5e panel once the GDM greeter is up
+After=gdm.service
+Requires=gdm.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/gts4lv-panel-kick
+
+[Install]
+WantedBy=graphical.target

@@ -1,0 +1,18 @@
+diff --git a/drivers/video/simplefb.c b/drivers/video/simplefb.c
+index 239b0067..ef283017 100644
+--- a/drivers/video/simplefb.c
++++ b/drivers/video/simplefb.c
+@@ -22,6 +22,13 @@ static int simple_video_probe(struct udevice *dev)
+ 	u32 width, height, rot;
+ 
+ 	base = dev_read_addr_size(dev, &size);
++	if (base == FDT_ADDR_T_NONE) {
++		/* The binding also allows the framebuffer as a memory-region (reserved-memory) */
++		ofnode mem = ofnode_parse_phandle(node, "memory-region", 0);
++
++		if (ofnode_valid(mem))
++			base = ofnode_get_addr_size(mem, "reg", &size);
++	}
+ 	if (base == FDT_ADDR_T_NONE) {
+ 		debug("%s: Failed to decode memory region\n", __func__);
+ 		return -EINVAL;

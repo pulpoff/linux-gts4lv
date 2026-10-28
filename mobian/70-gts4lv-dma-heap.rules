@@ -1,0 +1,3 @@
+# libcamera's software ISP allocates from the DMA-buf heaps; root-only by default, so apps run by
+# the user had no debayering and no camera.
+SUBSYSTEM=="dma_heap", GROUP="video", MODE="0660"

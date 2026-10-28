@@ -1,0 +1,10 @@
+[Unit]
+Description=USB OTG: host role and VBUS when the Type-C controller sees an OTG adapter
+
+[Service]
+ExecStart=/usr/local/sbin/gts4lv-usb-otgd
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

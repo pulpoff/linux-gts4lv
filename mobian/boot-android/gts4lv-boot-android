@@ -1,0 +1,17 @@
+#!/bin/sh
+# Restart into LineageOS (the boot partition), once. Run as root (pkexec, from the Android app).
+# Two things send the tablet back to Debian on a restart, and both are set aside here:
+#  - the bootloader message in misc ("boot-recovery"): cleared, and gts4lv-bootdefault, which writes it
+#    back at shutdown, is told to leave it (/run/gts4lv-boot-android);
+#  - the PMIC restart reason: "reboot android" asks for Samsung's NORMALBOOT (0x14, the DT's mode-android)
+#    instead of RECOVERY.
+# Back to Debian from LineageOS: Restart -> Recovery.
+set -eu
+M=/dev/disk/by-partlabel/misc
+[ -b "$M" ] || { echo "no misc partition" >&2; exit 1; }
+# Without mode-android in the running DT, "reboot android" would restart into Debian
+ls /proc/device-tree/soc@0/spmi@*/pmic@0/pon@*/mode-android >/dev/null 2>&1 ||
+	{ echo "this kernel's device tree has no Android restart mode yet (mode-android)" >&2; exit 1; }
+touch /run/gts4lv-boot-android
+head -c 32 /dev/zero | dd of="$M" bs=32 count=1 conv=notrunc,fsync status=none
+exec systemctl reboot --reboot-argument=android

@@ -1,0 +1,21 @@
+#!/bin/sh
+# Audio DSP. Started after GDM so a failure here cannot keep the desktop
+# away, and stopped before reboot: with the ADSP left running, ABL loops on
+# the next boot until a Power+Vol-Down reset.
+set -u
+adsp() { for r in /sys/class/remoteproc/remoteproc*; do [ "$(cat $r/name)" = adsp ] && echo $r; done; }
+R=$(adsp)
+[ -n "$R" ] || { echo "no adsp remoteproc"; exit 1; }
+case "${1:-start}" in
+start)
+	[ "$(cat $R/state)" = offline ] && echo start > $R/state
+	echo "adsp: $(cat $R/state)"
+	# LPASS LPI pins are dead until the ADSP runs (touching them hangs the
+	# bus), so the module is blacklisted and loaded here; the card follows.
+	[ "$(cat $R/state)" = running ] && modprobe pinctrl_sdm670_lpass_lpi
+	;;
+stop)
+	[ "$(cat $R/state)" = running ] && echo stop > $R/state
+	echo "adsp: $(cat $R/state)"
+	;;
+esac
