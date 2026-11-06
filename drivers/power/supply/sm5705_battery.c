@@ -220,13 +220,16 @@ static const struct power_supply_desc sm5705_chg_desc = {
 	.get_property = sm5705_chg_get_property,
 };
 
-/* Neither chip interrupts us here; poll so UPower sees changes. */
+/*
+ * Neither chip interrupts us here; poll so UPower sees changes. Frozen across
+ * system sleep: a wakeup event every 30 s kept s2idle from lasting.
+ */
 static void sm5705_poll(struct work_struct *work)
 {
 	struct sm5705 *sm = container_of(work, struct sm5705, work.work);
 
 	power_supply_changed(sm->psy);
-	schedule_delayed_work(&sm->work, POLL_INTERVAL);
+	queue_delayed_work(system_freezable_wq, &sm->work, POLL_INTERVAL);
 }
 
 static int sm5705_probe(struct i2c_client *client)
@@ -251,6 +254,8 @@ static int sm5705_probe(struct i2c_client *client)
 
 	cfg.drv_data = sm;
 	cfg.fwnode = dev_fwnode(&client->dev);
+	/* polled status, not an event: never a reason to stay awake */
+	cfg.no_wakeup_source = true;
 	sm->psy = devm_power_supply_register(&client->dev, desc, &cfg);
 	if (IS_ERR(sm->psy))
 		return PTR_ERR(sm->psy);
@@ -258,7 +263,7 @@ static int sm5705_probe(struct i2c_client *client)
 	ret = devm_delayed_work_autocancel(&client->dev, &sm->work, sm5705_poll);
 	if (ret)
 		return ret;
-	schedule_delayed_work(&sm->work, POLL_INTERVAL);
+	queue_delayed_work(system_freezable_wq, &sm->work, POLL_INTERVAL);
 	return 0;
 }
 
