@@ -172,6 +172,56 @@ static int sm8250_snd_startup(struct snd_pcm_substream *substream)
 	return qcom_snd_sdw_startup(substream);
 }
 
+/*
+ * The bit clock sm8250_snd_startup() turned on is an AFE clock vote held in
+ * the ADSP. Left on after the stream, it keeps the ADSP from ever power
+ * collapsing, and the SoC from reaching its low power modes in suspend.
+ */
+static void sm8250_snd_shutdown(struct snd_pcm_substream *substream)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+	int dir = SNDRV_PCM_STREAM_PLAYBACK;
+	int clk_id;
+
+	switch (cpu_dai->id) {
+	case PRIMARY_MI2S_RX:
+		clk_id = Q6AFE_LPASS_CLK_ID_PRI_MI2S_IBIT;
+		break;
+	case SECONDARY_MI2S_RX:
+		clk_id = Q6AFE_LPASS_CLK_ID_SEC_MI2S_IBIT;
+		break;
+	case TERTIARY_MI2S_RX:
+		clk_id = Q6AFE_LPASS_CLK_ID_TER_MI2S_IBIT;
+		break;
+	case QUINARY_MI2S_RX:
+		clk_id = Q6AFE_LPASS_CLK_ID_QUI_MI2S_IBIT;
+		break;
+	case PRIMARY_TDM_TX_0:
+		clk_id = Q6AFE_LPASS_CLK_ID_PRI_TDM_IBIT;
+		dir = SNDRV_PCM_STREAM_CAPTURE;
+		break;
+	case SECONDARY_TDM_RX_0:
+		clk_id = Q6AFE_LPASS_CLK_ID_SEC_TDM_IBIT;
+		break;
+	case LPI_MI2S_RX_0:
+		clk_id = Q6AFE_LPASS_CLK_ID_INT0_MI2S_IBIT;
+		break;
+	case LPI_MI2S_TX_3:
+		clk_id = Q6AFE_LPASS_CLK_ID_INT3_MI2S_IBIT;
+		dir = SNDRV_PCM_STREAM_CAPTURE;
+		break;
+	default:
+		clk_id = 0;
+		break;
+	}
+
+	if (clk_id)
+		snd_soc_dai_set_sysclk(cpu_dai, clk_id, 0, dir);
+
+	qcom_snd_sdw_shutdown(substream);
+}
+
 static unsigned int tdm_slot_off[] = {
 	0, 4, 8, 12, 16, 20, 24, 28
 };
@@ -256,7 +306,7 @@ static int sm8250_snd_hw_free(struct snd_pcm_substream *substream)
 static const struct snd_soc_ops sm8250_be_ops = {
 	.startup = sm8250_snd_startup,
 	.hw_params = sm8250_snd_hw_params,
-	.shutdown = qcom_snd_sdw_shutdown,
+	.shutdown = sm8250_snd_shutdown,
 	.hw_free = sm8250_snd_hw_free,
 	.prepare = sm8250_snd_prepare,
 };
