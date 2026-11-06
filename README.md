@@ -11,14 +11,15 @@ to 7.2.13 with the stable incremental patches), plus the tablet changes listed b
 New in this version
 ===================
 
-* **Sleep works.** The tablet suspends (s2idle) and the power key wakes it. Until now every suspend ended
-  in a reboot: the bootloader leaves the watchdog running, `qcom-wdt` only stopped it for suspend when
-  userspace had opened it, and the kernel's own pinging stops in s2idle, so the bark woke the tablet and
-  the pretimeout panicked it. The image now sleeps two minutes after the screen goes off on battery, with
-  Wi-Fi and Bluetooth off; see Power and reset.
-* **Boot in 12 s instead of 27 s** (kernel 2 s, userspace 10 s). `qcom-cpufreq-hw` waits for the OSM L3
-  interconnect provider, which was a module loaded about 10 s into boot: everything before it, the
-  whole early userspace included, ran at the clock the bootloader left. It is built in now.
+* **Sleep costs less.** Asleep, the tablet drew 220-250 mA: the ADSP never power-collapsed, and
+  the SoC's 19.2 MHz crystal never stopped. The digital codec's MCLK and the speaker link's bit clock held
+  the ADSP, and a clock leaked by the touchscreen's I2C bus held the crystal; all three are fixed (see
+  Power and reset and Audio). The SM5705 fuel gauge's poll no longer counts as a wakeup event either.
+  Before, the battery dropped 2.2-3 % an hour in long sleeps. A first two-hour run with the ADSP fixes
+  lost 2 % in all, and the ADSP now sleeps through the suspend. Whether the SoC reaches its deepest sleep
+  with the crystal fix is being measured.
+* Earlier (October 28): sleep works at all (`qcom-wdt`), and boot takes 12 s instead of 27 s (OSM L3
+  built in). See Power and reset.
 
 What works
 ==========
@@ -114,6 +115,13 @@ Audio
 
 * **cs35l41**: `cirrus,asp-rx-slots` property. Four amps share one TDM bus and each needs its own slot;
   Android sets them from mixer paths, and there is no mixer control for it.
+* **msm8916-wcd-digital**: runtime PM. Its MCLK is the ADSP's LPASS clock, which the driver took at probe
+  and held until removal, so the ADSP never power-collapsed. Now the clocks run only while ASoC holds the
+  codec (a stream, or DAPM while its bias is above OFF), with a 3 s autosuspend. The register cache is
+  filled from the hardware at probe and every register is written back on resume. `idle_bias_on` is gone:
+  with no bias to set it only kept DAPM's runtime PM reference forever.
+* **sm8250**: a back-end shutdown that sets the bit clock its startup turned on back to 0. That clock is an
+  AFE vote in the ADSP, and after the first stream it kept the ADSP awake for good.
 
 USB
 ---
@@ -147,7 +155,10 @@ Power and reset
 * **SM5705 fuel gauge and charger status** (`drivers/power/supply/sm5705_battery.c`, new, read-only):
   capacity, voltage, current, charging state, and charge, energy and power (`charge_now` from the gauge's
   1/256 % state of charge; energy at the battery's nominal 3.85 V, 27.1 Wh), which UPower needs for the
-  discharge rate and GNOME's "time remaining". The chips charge on their own.
+  discharge rate and GNOME's "time remaining". The chips charge on their own. Its 30 s poll is not a
+  wakeup source and is frozen across system sleep: each one ended an s2idle. `charge_now` follows the
+  gauge's model, not a coulomb counter: after unplugging it can hold still for most of an hour and then
+  catch up.
 * **Suspend** (s2idle; the SoC offers no deeper state to Linux):
   * **qcom-wdt** stops the watchdog for suspend, and starts it again on resume, whenever it runs, not only
     when userspace opened it. The bootloader leaves it running, the watchdog core pings it from a kernel
@@ -156,8 +167,16 @@ Power and reset
     cxsd, and each subsystem's sleep). This needed the AOSS QMP node cut down to the 0x400 bytes of its
     message RAM, as on SDM845; it covered 1 MiB, the stats included.
   * Userspace has to stop the FastRPC servers (hexagonrpcd) before suspend. Frozen in the middle of a call,
-    they crashed the ADSP's sensor process, and its recovery ended in a NoC error and a hang.
-* **CPU frequency from the start**: `CONFIG_INTERCONNECT_QCOM_OSM_L3=y` (see New in this version).
+    they crashed the ADSP's sensor process, and its recovery ended in a NoC error and a hang. Running,
+    they also keep the ADSP awake through the suspend.
+  * **i2c-qcom-geni**: a probe deferred while the GPI DMA driver is not there yet (both are modules) left
+    the SE clocks enabled: the init's `pm_runtime_put` queued a suspend that the failed probe's
+    `pm_runtime_disable` cancelled, and the device was then marked suspended with its clocks on. The
+    touchscreen's bus collected nine of them per boot, and through them the crystal stayed on in sleep. A
+    failed init now suspends synchronously.
+* **CPU frequency from the start**: `CONFIG_INTERCONNECT_QCOM_OSM_L3=y`. `qcom-cpufreq-hw` waits for the OSM
+  L3 interconnect provider; as a module it came about 10 s into boot, and everything before it ran at the
+  bootloader's clock. Boot went from 27 s to 12 s.
 * **Restart into Android**: `mode-android` (Samsung's NORMALBOOT, 0x14) on the PON, so `systemctl reboot
   --reboot-argument=android` starts LineageOS from the boot partition; every other restart asks for
   RECOVERY, where this system lives. Userspace also clears "boot-recovery" from `misc` (see
@@ -185,4 +204,7 @@ The image also needs, in userspace: the touchscreen daemon (it also does double 
 daemon (blank and lock, and the sleep policy: two minutes after the screen goes off on battery, not while
 audio plays, Wi-Fi, Bluetooth, the sensor stack and touch off for the sleep), the USB role daemon, LineageOS's firmware (read from the tablet's own partitions at boot), hexagonrpcd and libssc for the
 sensors, and a patched iio-sensor-proxy (a sensor claimed while it was still being opened never started; the
-light level is smoothed). They are in [`mobian/`](mobian/), with the scripts that build the image and U-Boot's boot menu.
+light level is smoothed). Also there: Chromium's flags and a Shell extension that opens the on-screen keyboard
+for its text fields, the Venus codec under the device names Chromium looks for, the tablet's own Wi-Fi MAC from
+the EFS partition, and `zip/`, which turns the running system into a zip for LineageOS recovery's "Apply
+update". They are in [`mobian/`](mobian/), with the scripts that build the image and U-Boot's boot menu.

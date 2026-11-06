@@ -17,6 +17,7 @@ from evdev import ecodes as e
 BOOST = {'policy0': 1324800, 'policy6': 1363200}       # kHz
 HOLD = float(os.environ.get('TOUCHBOOST_HOLD_MS', '1000')) / 1000
 GPU = '/sys/class/devfreq/5000000.gpu'
+GAME_HOLD = '/run/gts4lv-gpu-boost'
 # 0 = leave the GPU alone, the default here: a 430 MHz floor (its top step on this
 # speed bin) made scrolling and animations stutter badly instead of helping.
 GPU_BOOST = int(os.environ.get('TOUCHBOOST_GPU_HZ', '0'))
@@ -44,7 +45,9 @@ def set_min(values, gpu=None):
         try:
             with open(f'{BASE}/{pol}/scaling_min_freq', 'w') as f: f.write(str(khz))
         except OSError as ex: print(f'{pol}: {ex}', file=sys.stderr)
-    if gpu and GPU_BOOST:
+    # A game holding the GPU at its top clock (gts4lv-gpu-boost) owns min_freq until it exits: the touch
+    # release used to put the floor back to 180 MHz in the middle of a match.
+    if gpu and GPU_BOOST and not os.path.exists(GAME_HOLD):
         try:
             with open(f'{GPU}/min_freq', 'w') as f: f.write(str(gpu))
         except OSError as ex: print(f'gpu: {ex}', file=sys.stderr)

@@ -123,6 +123,14 @@ ch systemctl enable gts4lv-touchd.service >/dev/null
 install -m 755 /home/pulp/gts4lv/mobian/gts4lv-powerkey $R/usr/local/sbin/gts4lv-powerkey
 install -m 644 /home/pulp/gts4lv/mobian/gts4lv-powerkey.service $R/etc/systemd/system/gts4lv-powerkey.service
 ch systemctl enable gts4lv-powerkey.service >/dev/null
+# Wi-Fi keeps the tablet's own MAC (from EFS), so its address and DHCP lease stay put.
+install -m 755 /home/pulp/gts4lv/mobian/gts4lv-wifi-mac $R/usr/local/sbin/gts4lv-wifi-mac
+install -m 644 /home/pulp/gts4lv/mobian/gts4lv-wifi-mac.service $R/etc/systemd/system/gts4lv-wifi-mac.service
+ch systemctl enable gts4lv-wifi-mac.service >/dev/null
+# Games hold the GPU at its top clock while they run (the GeneralsX launcher calls this).
+install -m 755 /home/pulp/gts4lv/mobian/gts4lv-gpu-boost $R/usr/local/sbin/gts4lv-gpu-boost
+echo "%users ALL=(root) NOPASSWD: /usr/local/sbin/gts4lv-gpu-boost" > $R/etc/sudoers.d/gts4lv-gpu-boost
+chmod 440 $R/etc/sudoers.d/gts4lv-gpu-boost
 
 # ath10k's host-side feature file (linux-firmware, firmware-atheros). Only this
 # one: Debian's board-2.bin would win over Samsung's bdwlan.bin.
@@ -142,6 +150,8 @@ mkdir -p $R/usr/share/alsa/ucm2/conf.d/sdm660
 ln -sf ../../Samsung/gts4lv/gts4lv.conf "$R/usr/share/alsa/ucm2/conf.d/sdm660/Galaxy Tab S5e.conf"
 # Speakers are silent with S24_LE (PipeWire's default pick); pin outputs to S16LE.
 install -D -m 644 /home/pulp/gts4lv/mobian/51-gts4lv-s16.conf $R/etc/wireplumber/wireplumber.conf.d/51-gts4lv-s16.conf
+# Logs: notices and up only, journal capped at 32 MB (zz-gts4lv-quiet.conf)
+install -D -m 644 /home/pulp/gts4lv/mobian/zz-gts4lv-quiet.conf $R/etc/systemd/journald.conf.d/zz-gts4lv-quiet.conf
 
 # No suspend at all: it takes USB networking, Wi-Fi and Bluetooth down. The
 # power key locks and blanks instead (GNOME's screensaver binding).
@@ -269,3 +279,10 @@ install -D -m 644 $BA/de.gts4lv.boot-android.policy $R/usr/share/polkit-1/action
 install -D -m 644 $BA/de.gts4lv.BootAndroid.svg $R/usr/share/icons/hicolor/scalable/apps/de.gts4lv.BootAndroid.svg
 install -D -m 644 $BA/de.gts4lv.BootAndroid-symbolic.svg $R/usr/share/icons/hicolor/symbolic/apps/de.gts4lv.BootAndroid-symbolic.svg
 ch gtk-update-icon-cache -q /usr/share/icons/hicolor || true
+
+# The browser: Google Chrome from Google's own repository (it stays updated through apt). Chromium was
+# dropped 2026-10-28: its on-screen keyboard needed a shell extension, Chrome's works as it is.
+install -D -m 644 /home/pulp/gts4lv/mobian/chrome/google-chrome.gpg $R/usr/share/keyrings/google-chrome.gpg
+install -m 644 /home/pulp/gts4lv/mobian/chrome/google-chrome.sources $R/etc/apt/sources.list.d/google-chrome.sources
+ch apt-get update
+ch env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends google-chrome-stable

@@ -1,0 +1,4 @@
+# The Venus hardware codec under the names Chromium's V4L2 video code looks for
+# (Raspberry Pi OS's build: /dev/video-dec<N>, /dev/video-enc<N>).
+SUBSYSTEM=="video4linux", ATTR{name}=="qcom-venus-decoder", SYMLINK+="video-dec0"
+SUBSYSTEM=="video4linux", ATTR{name}=="qcom-venus-encoder", SYMLINK+="video-enc0"

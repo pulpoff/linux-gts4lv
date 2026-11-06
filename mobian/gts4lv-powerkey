@@ -194,6 +194,7 @@ RESLEEP_AFTER = int(os.environ.get("GTS4LV_RESLEEP_AFTER", 10))
 SLEEP_ALARM = int(os.environ.get("GTS4LV_SLEEP_ALARM", 0))	# testing: an RTC wake after this many s
 SLEEP_ON_CHARGER = os.environ.get("GTS4LV_SLEEP_ON_CHARGER") == "1"	# testing over USB
 off_since = None	# monotonic time the panel went off; None while it is on
+lid_since = None	# monotonic time the cover closed; None while it is open
 CHARGER = "/sys/class/power_supply/sm5705-charger/online"
 # FastRPC servers frozen mid-call crashed the ADSP's sensor process, and its recovery hung the bus
 SLEEP_STOP = ["iio-sensor-proxy", "hexagonrpcd-adsp-sensorspd", "hexagonrpcd-adsp-rootpd"]
@@ -309,17 +310,31 @@ def system_sleep():
 
 
 def sleeper():
-    global off_since, press_done
+    global off_since, lid_since, press_done
+    why_not = None
     while True:
         time.sleep(5)
-        since = off_since
-        if since is None or time.monotonic() - since < SLEEP_AFTER or \
-                (read_int(CHARGER, 1) and not SLEEP_ON_CHARGER):
-            continue
-        if audio_playing() or sleep_blocked():
+        since = off_since if off_since is not None else lid_since
+        if since is None:
+            why = "panel on"
+        elif time.monotonic() - since < SLEEP_AFTER:
+            why = "panel off < %d s" % SLEEP_AFTER
+        elif read_int(CHARGER, 1) and not SLEEP_ON_CHARGER:
+            why = "on the charger"
+        elif audio_playing():
+            why = "audio playing"
+        elif sleep_blocked():
+            why = "sleep inhibited"
+        else:
+            why = None
+        if why != why_not:
+            # the night it never slept left no trace of which of these held it
+            log("no sleep: " + why if why else "sleep due")
+            why_not = why
+        if why:
             continue
         with busy:
-            if off_since is None:
+            if off_since is None and lid_since is None:
                 continue
             woke = system_sleep()
             if woke:
@@ -329,6 +344,8 @@ def sleeper():
                 press_done = time.time() + 0.5
             if off_since is not None:
                 off_since = time.monotonic() - SLEEP_AFTER + RESLEEP_AFTER
+            if lid_since is not None:
+                lid_since = time.monotonic() - SLEEP_AFTER + RESLEEP_AFTER
 
 
 def pressed(want=None, at=None):
@@ -354,6 +371,8 @@ def _pressed(want):
     user, uid = s
     try:
         blank = is_blank(user, uid)
+        if blank:
+            panel_off(True)
         locked = user not in GREETERS and "true" in screensaver(user, uid, "GetActive")
         log("press want", want, "blank", blank, "bl", bl_get(), "saved", saved_level, "locked", locked)
         if not blank and saved_level and saved_level > 1 and bl_get() == 1:
@@ -486,6 +505,10 @@ def watch_power_save():
             continue
         user, uid = s
         log("power save monitor on", user, active)
+        try:
+            panel_off(is_blank(user, uid))
+        except (subprocess.SubprocessError, OSError) as e:
+            log("power save state:", e)
         env = {"DBUS_SESSION_BUS_ADDRESS": shell_bus(uid), "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}
         p = subprocess.Popen(["runuser", "-u", user, "--", "gdbus", "monitor", "--session",
                               "--dest", DC[0], "--object-path", DC[1]],
@@ -538,4 +561,8 @@ while True:
             # if locking is on) does not switch the panel off, so do it all here.
             pressed(at=at)
         elif typ == EV_SW and code == SW_LID:
+            # mutter also sees the cover (re-sent on our uinput device) and
+            # turns the panel off itself, which PowerSaveMode does not report:
+            # a closed cover is off for system sleep whatever mutter says
+            lid_since = time.monotonic() if value else None
             pressed(want=bool(value))

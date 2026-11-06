@@ -1,0 +1,12 @@
+#!/bin/sh
+# gts4lv-gpu-boost on|off: hold the Adreno 615 at its top clock (430 MHz) while a game runs.
+# simple_ondemand otherwise drops it mid-game and Zero Hour loses 10-15 fps.
+G=/sys/class/devfreq/5000000.gpu
+case "$1" in
+# /run/gts4lv-gpu-boost tells touchboost to keep its hands off min_freq meanwhile.
+on)  touch /run/gts4lv-gpu-boost
+     tr ' ' '\n' < $G/available_frequencies | sort -n | tail -1 > $G/min_freq ;;
+off) rm -f /run/gts4lv-gpu-boost
+     tr ' ' '\n' < $G/available_frequencies | grep . | sort -n | head -1 > $G/min_freq ;;
+*)   echo "usage: $0 on|off" >&2; exit 2 ;;
+esac

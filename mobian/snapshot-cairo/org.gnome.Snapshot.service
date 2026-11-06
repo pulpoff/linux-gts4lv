@@ -1,0 +1,6 @@
+# /usr/local/share/dbus-1/services: overrides /usr/share/dbus-1/services/org.gnome.Snapshot.service.
+# Snapshot's preview froze after ~2 s whenever GTK drew it with the GPU while libcamera's soft ISP
+# debayered on the GPU too (wireplumber process); with GTK's cairo renderer it streams steadily.
+[D-BUS Service]
+Name=org.gnome.Snapshot
+Exec=/usr/bin/env GSK_RENDERER=cairo /usr/bin/snapshot --gapplication-service

@@ -1,0 +1,14 @@
+#!/bin/sh
+# gts4lv-wifi-mac: give NetworkManager this tablet's own Wi-Fi MAC, the one Samsung stored in
+# the EFS partition (wifi/.mac.info) and LineageOS uses, so the address and its DHCP lease stay
+# the same on every boot (ath10k otherwise comes up with a random one). Read with debugfs: EFS
+# is never mounted. Runs before NetworkManager; writes to /run, so nothing per-device is kept
+# in the image.
+set -eu
+EFS=/dev/disk/by-partlabel/efs
+OUT=/run/NetworkManager/conf.d/90-gts4lv-wifi-mac.conf
+[ -b $EFS ] || exit 0
+MAC=$(debugfs -R "cat /wifi/.mac.info" $EFS 2>/dev/null | tr -d '\n\r ' | tr A-F a-f)
+echo "$MAC" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || { echo "no valid MAC in EFS" >&2; exit 0; }
+mkdir -p "$(dirname $OUT)"
+printf '[connection-gts4lv-wifi-mac]\nmatch-device=interface-name:wlan0\nwifi.cloned-mac-address=%s\n' "$MAC" > $OUT

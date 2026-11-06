@@ -6,7 +6,7 @@ set -eu
 K=$HOME/gts4lv/kit
 B=${B:-$HOME/gts4lv/build}
 DEBS=$HOME/gts4lv/debs/root
-OUT=$HOME/gts4lv/out
+OUT=${OUT:-$HOME/gts4lv/out}
 DATE=$(date +%Y%m%d-%H%M)
 mkdir -p $OUT
 W=$(mktemp -d $OUT/work.XXXX)
@@ -42,18 +42,19 @@ cp $K/wifi-up $R/usr/sbin/wifi-up
 aarch64-linux-gnu-gcc -static -Os -s -o $R/usr/sbin/rebootmode $K/rebootmode.c
 aarch64-linux-gnu-gcc -static -Os -s -o $R/usr/sbin/dmlinear $K/tools/dmlinear.c
 # Where Mobian's rootfs.img (in Android's /data/lost+found) sits on userdata.
-cp $K/rootfs-extents.txt $R/etc/rootfs-extents.txt
+[ -n "${PUBLIC:-}" ] || cp $K/rootfs-extents.txt $R/etc/rootfs-extents.txt
 cp $DEBS/etc/mke2fs.conf $R/etc/mke2fs.conf
 cp $K/udhcpc.script $R/etc/udhcpc.script
 chmod 755 $R/usr/sbin/wifi-up $R/etc/udhcpc.script
-{ echo "ctrl_interface=/run/wpa_supplicant"; echo "update_config=0"; echo "country=DE"; cat $K/wifi.conf; } > $R/etc/wpa_supplicant.conf
+# PUBLIC=1: a build to hand out, without this house's Wi-Fi or the developer's ssh key.
+{ echo "ctrl_interface=/run/wpa_supplicant"; echo "update_config=0"; echo "country=DE"; [ -n "${PUBLIC:-}" ] || cat $K/wifi.conf; } > $R/etc/wpa_supplicant.conf
 chmod 600 $R/etc/wpa_supplicant.conf
 ln -s ../usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1 $R/lib/ld-linux-aarch64.so.1
 ln -s ../usr/lib/aarch64-linux-gnu $R/lib/aarch64-linux-gnu
 echo "root:x:0:0:root:/root:/bin/sh" > $R/etc/passwd
 echo "root::0::::::" > $R/etc/shadow
 echo "/bin/sh" > $R/etc/shells
-cp $HOME/.ssh/id_ed25519.pub $R/root/.ssh/authorized_keys
+if [ -n "${PUBLIC:-}" ]; then : > $R/root/.ssh/authorized_keys; else cp $HOME/.ssh/id_ed25519.pub $R/root/.ssh/authorized_keys; fi
 chmod 700 $R/root/.ssh; chmod 600 $R/root/.ssh/authorized_keys
 (cd $R && find . | cpio -o -H newc -R 0:0 --quiet | gzip -9) > $W/initramfs.cpio.gz
 

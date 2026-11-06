@@ -1,0 +1,11 @@
+[Unit]
+Description=Tablet's own Wi-Fi MAC for NetworkManager (from EFS)
+Before=NetworkManager.service
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/gts4lv-wifi-mac
+
+[Install]
+WantedBy=NetworkManager.service

@@ -14,12 +14,13 @@ PKGS="systemd-sysv udev dbus dbus-user-session systemd-timesyncd systemd-resolve
  network-manager wpasupplicant iw wireless-regdb
  rmtfs tqftpserv qrtr-tools hexagonrpcd libqmi-glib5 libqrtr-glib0 libprotobuf-c1 python3-evdev
  gdm3 gnome-shell gnome-session gnome-settings-daemon gnome-control-center
- gnome-console nautilus gnome-text-editor gnome-keyring gnome-shell-extensions
+ gnome-console nautilus gnome-text-editor gnome-keyring libpam-gnome-keyring gnome-shell-extensions
  xwayland accountsservice polkitd upower iio-sensor-proxy
  libgl1-mesa-dri libegl-mesa0 mesa-vulkan-drivers
  adwaita-icon-theme fonts-cantarell fonts-dejavu-core gnome-backgrounds
  pipewire-pulse wireplumber bluez alsa-ucm-conf mesa-utils vulkan-tools
- v4l-utils libcamera-tools libcamera-ipa gstreamer1.0-libcamera gstreamer1.0-tools pipewire-libcamera"
+ v4l-utils libcamera-tools libcamera-ipa gstreamer1.0-libcamera gstreamer1.0-tools pipewire-libcamera
+ telegram-desktop"
 
 exec sudo -n TMPDIR=$HOME/gts4lv/mobian/tmp mmdebstrap \
 	--arch=arm64 --variant=important --format=tar \

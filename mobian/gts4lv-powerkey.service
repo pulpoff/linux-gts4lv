@@ -8,6 +8,9 @@ PartOf=gts4lv-touchd.service
 ExecStart=/usr/local/sbin/gts4lv-powerkey
 Restart=always
 RestartSec=2
+# zz-gts4lv-quiet.conf stores only notice and up; its sleep/wake log is the
+# only record of why a night went without sleep
+SyslogLevel=notice
 
 [Install]
 WantedBy=graphical.target

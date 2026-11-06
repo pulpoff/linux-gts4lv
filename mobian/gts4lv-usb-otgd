@@ -5,10 +5,19 @@
 # the tablet as DFP (an OTG adapter or hub), switches the dwc3 role to host
 # and turns the SM5705 boost on for VBUS (gts4lv-usb-mode). Back to device
 # when it is unplugged.
+#
+# The controller enters host, but does not keep it: with a hub on the port it
+# reports attached for a second or two, then detached, then attached again,
+# and never sets source/dfp after the first time, though the hub runs fine on
+# our VBUS. Following that tore the bus down every two seconds (2026-10-28).
+# So once in host, stay while anything is on the bus (we power it, so that is
+# the real "plugged in"); leave after HOST_EMPTY_S without a device, allowing
+# HOST_SETTLE_S for the first one to enumerate.
 import fcntl, glob, os, subprocess, time
 
 I2C_SLAVE_FORCE, I2C_RDWR = 0x0706, 0x0707
 ADDR = 0x33
+HOST_SETTLE_S, HOST_EMPTY_S = 5, 2
 
 
 def bus_of(name):
@@ -35,17 +44,38 @@ def role():
         return None
 
 
+def bus_has_device():
+    # Root hubs are usbN; anything plugged into one shows up as N-port...
+    return any("-" in os.path.basename(d) and ":" not in os.path.basename(d)
+               for d in glob.glob("/sys/bus/usb/devices/*"))
+
+
 want_prev = None
+# Started (or restarted) with the port already in host: keep that session.
+host_since = time.monotonic() if role() == "host" else None
+empty_since = None
 while True:
     try:
         s = func_state()
     except OSError:
         time.sleep(2)
         continue
+    now = time.monotonic()
     want = "host" if s["attached"] and s["dfp"] else "device"
+    if role() == "host" and host_since is not None and want == "device":
+        if bus_has_device():
+            empty_since = None
+            want = "host"
+        else:
+            empty_since = empty_since or now
+            if now - host_since < HOST_SETTLE_S or now - empty_since < HOST_EMPTY_S:
+                want = "host"
     if want != want_prev:
-        print(f"S2MM005 {s} -> {want}", flush=True)
+        print(f"S2MM005 {s} bus {'busy' if bus_has_device() else 'empty'} -> {want}", flush=True)
         want_prev = want
     if role() and role() != want:
-        subprocess.run(["gts4lv-usb-mode", want])
+        if subprocess.run(["gts4lv-usb-mode", want]).returncode == 0 and want == "host":
+            host_since, empty_since = now, None
+    if want == "device":
+        host_since = empty_since = None
     time.sleep(1)

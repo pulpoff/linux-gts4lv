@@ -1,0 +1,31 @@
+ui_print("Mobian (Debian + GNOME) for the Galaxy Tab S5e Wi-Fi");
+assert(getprop("ro.product.device") == "gts4lvwifi" || getprop("ro.build.product") == "gts4lvwifi" ||
+       abort("This package is for the Galaxy Tab S5e Wi-Fi (gts4lvwifi); this device is " + getprop("ro.product.device") + "."););
+show_progress(1.000000, 0);
+package_extract_file("install.sh", "/tmp/gts4lv-install.sh");
+package_extract_file("extents", "/tmp/gts4lv-extents");
+ui_print("- checking /data (ext4, 10 GiB free)");
+if run_program("/system/bin/sh", "/tmp/gts4lv-install.sh", "prepare") != 0 then
+    abort("ERROR: " + file_getprop("/tmp/gts4lv.prop", "error"));
+endif;
+set_progress(0.020000);
+ui_print("- writing the system to /data/lost+found/mobian/rootfs.img");
+ui_print("  (several minutes; Android and its data are kept)");
+package_extract_file("rootfs.img", "/data/lost+found/mobian/rootfs.img") ||
+    abort("ERROR: could not write rootfs.img (free space?)");
+set_progress(0.950000);
+ui_print("- U-Boot, LineageOS recovery and Linux to the recovery partition");
+package_extract_file("recovery.img", "/dev/block/bootdevice/by-name/recovery") ||
+    abort("ERROR: could not write the recovery partition");
+ui_print("- pinning rootfs.img and recording where it lies");
+if run_program("/system/bin/sh", "/tmp/gts4lv-install.sh", "finish") != 0 then
+    abort("ERROR: " + file_getprop("/tmp/gts4lv.prop", "error"));
+endif;
+set_progress(1.000000);
+ui_print("Done.");
+ui_print("IMPORTANT: in Android, switch OFF Settings > System > Developer options >");
+ui_print("Update recovery. Left on, Android's next boot overwrites U-Boot and Linux.");
+ui_print("Boot Linux: Advanced > Reboot to recovery (here), or Restart > Recovery in Android.");
+ui_print("User mobian, password 1234. The first boot grows the system to 9 GiB.");
+ui_print("A normal power-on still starts Android; once Linux has run it starts Linux,");
+ui_print("and its Android app restarts into Android.");

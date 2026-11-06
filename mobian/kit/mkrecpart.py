@@ -76,7 +76,9 @@ linux = v2(open(a.kernel, "rb").read(), open(a.initramfs, "rb").read(), dtb)
 
 assert len(uboot) <= LINEAGE_OFF, len(uboot)
 assert LINEAGE_OFF + len(lineage) <= LINUX_OFF, len(lineage)
-assert LINUX_OFF + len(linux) <= PART, "Linux is %d bytes, %d fit" % (len(linux), PART - LINUX_OFF)
+# The last 512 KiB hold the rootfs extent list the sideload installer writes (init reads it).
+TAIL = 512 << 10
+assert LINUX_OFF + len(linux) <= PART - TAIL, "Linux is %d bytes, %d fit" % (len(linux), PART - TAIL - LINUX_OFF)
 out = bytearray(LINUX_OFF + len(linux))
 out[0:len(uboot)] = uboot
 out[LINEAGE_OFF:LINEAGE_OFF + len(lineage)] = lineage
@@ -84,4 +86,4 @@ out[LINUX_OFF:] = linux
 open(a.output, "wb").write(out)
 for n, b, off in (("U-Boot", uboot, 0), ("LineageOS recovery", lineage, LINEAGE_OFF), ("Linux", linux, LINUX_OFF)):
     print("%-20s at %2d MiB: %8d bytes" % (n, off >> 20, len(b)))
-print(a.output, len(out), "bytes;", PART - len(out), "left for Linux to grow")
+print(a.output, len(out), "bytes;", PART - TAIL - len(out), "left for Linux to grow")

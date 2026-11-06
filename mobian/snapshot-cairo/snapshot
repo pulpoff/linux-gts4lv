@@ -1,0 +1,3 @@
+#!/bin/sh
+# /usr/local/bin/snapshot: see /usr/local/share/dbus-1/services/org.gnome.Snapshot.service
+GSK_RENDERER=cairo exec /usr/bin/snapshot "$@"

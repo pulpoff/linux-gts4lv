@@ -1,0 +1,6 @@
+{
+  "uuid": "osk-chromium@gts4lv",
+  "name": "Screen keyboard for Chromium",
+  "description": "Opens the on-screen keyboard when a text field in Chromium takes focus on a touchscreen. Mutter shows the keyboard only for a client that enables text input a second time while already focused, which GTK does on every tap and Chromium never does.",
+  "shell-version": ["48", "49", "50", "51"]
+}

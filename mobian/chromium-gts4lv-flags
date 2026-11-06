@@ -1,0 +1,7 @@
+# Tab S5e (/etc/chromium.d/gts4lv):
+# - the on-screen keyboard: GNOME learns a text field has focus only over Wayland's text-input-v3,
+#   which Chromium speaks only when asked;
+# - video on the Venus hardware decoder (H.264, HEVC; /dev/video-dec0, 70-gts4lv-video-codec.rules),
+#   its frames handed to the GPU as dma-bufs (zero copy) instead of read back by the CPU.
+export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --enable-wayland-ime --wayland-text-input-version=3"
+export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --enable-features=AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL,AcceleratedVideoEncoder"

@@ -108,13 +108,33 @@ part() {
 		grep -qx "PARTNAME=$1" "$u" && { echo /dev/$(basename $(dirname $u)); return; }
 	done
 }
+# Where rootfs.img lies on userdata. The sideload zip's installer writes the list
+# into the last 512 KiB of the recovery partition, after a "GTS4LV-EXTENTS 1"
+# line and up to an "END" line; a build for one tablet carries it in /etc.
+extents() {
+	r=$(part recovery)
+	if [ -n "$r" ]; then
+		n=$(cat /sys/class/block/${r#/dev/}/size)
+		dd if=$r bs=512 skip=$((n - 1024)) count=1024 2>/dev/null | tr -d '\000' > /run/tail.txt
+		if [ "$(head -n1 /run/tail.txt)" = "GTS4LV-EXTENTS 1" ] && grep -qx END /run/tail.txt; then
+			sed -n '2,/^END$/p' /run/tail.txt | grep -vx END > /run/rootfs-extents.txt
+			echo /run/rootfs-extents.txt; return
+		fi
+	fi
+	echo /etc/rootfs-extents.txt
+}
 mobian() {
 	# userdata can show up a moment after this runs; dmlinear without it fails.
 	i=0; while [ -z "$(part userdata)" ] && [ $i -lt 10 ]; do sleep 1; i=$((i+1)); done
-	[ -b /dev/dm-0 ] || dmlinear mobian $(part userdata) /etc/rootfs-extents.txt > /run/mobian.dev || {
-		log "mobian: dmlinear failed (userdata: '$(part userdata)')"; return 1; }
+	X=$(extents)
+	[ -b /dev/dm-0 ] || dmlinear mobian $(part userdata) $X > /run/mobian.dev || {
+		log "mobian: dmlinear failed (userdata: '$(part userdata)', extents $X)"; return 1; }
 	mkdir -p /mnt/root
 	mount -t ext4 -o rw,noatime /dev/dm-0 /mnt/root 2>/dev/null || { log "mobian: no filesystem on dm-0"; return 1; }
+	# The zip ships the file system shrunk to its content: grow it to the whole file
+	# (a no-op once it fills it). Online, so no fsck first; resize2fs reads /etc/mtab.
+	ln -sf /proc/mounts /etc/mtab
+	resize2fs /dev/dm-0 > /run/resize2fs.log 2>&1 || log "mobian: resize2fs failed"
 	[ -x /mnt/root/lib/systemd/systemd ] || { log "mobian: rootfs has no systemd"; umount /mnt/root; return 1; }
 	if grep -qs GTS4LV-SWITCHROOT /sys/fs/pstore/* && ! grep -qs GTS4LV-MOBIAN-OK /sys/fs/pstore/*; then
 		log "mobian: the last boot into it never came up (pstore), staying here"
