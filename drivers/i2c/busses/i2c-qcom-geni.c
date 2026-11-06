@@ -1073,7 +1073,16 @@ static int geni_i2c_init(struct geni_i2c_dev *gi2c)
 	}
 
 err:
-	pm_runtime_put(gi2c->se.dev);
+	/*
+	 * A failed probe disables runtime PM right after this, which cancels a
+	 * pending autosuspend and leaves the clocks on for good: one enable of
+	 * the SE clock (and with it the XO) per probe deferred for the GPI DMA
+	 * controller. Suspend synchronously instead.
+	 */
+	if (ret)
+		pm_runtime_put_sync_suspend(gi2c->se.dev);
+	else
+		pm_runtime_put(gi2c->se.dev);
 	return ret;
 }
 
