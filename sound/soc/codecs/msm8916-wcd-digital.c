@@ -9,6 +9,7 @@
 #include <linux/clk.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/mfd/syscon.h>
 #include <sound/soc.h>
@@ -226,6 +227,7 @@ struct wcd_iir_filter_ctl {
 
 struct msm8916_wcd_digital_priv {
 	struct clk *ahbclk, *mclk;
+	struct regmap *regmap;
 };
 
 static const unsigned long rx_gain_reg[] = {
@@ -1150,18 +1152,123 @@ static const struct snd_soc_component_driver msm8916_wcd_digital = {
 	.num_dapm_widgets	= ARRAY_SIZE(msm8916_wcd_digital_dapm_widgets),
 	.dapm_routes		= msm8916_wcd_digital_audio_map,
 	.num_dapm_routes	= ARRAY_SIZE(msm8916_wcd_digital_audio_map),
-	.idle_bias_on		= 1,
+	/*
+	 * No idle bias: there is no bias to keep, and DAPM holds a runtime PM
+	 * reference for as long as the bias is above OFF.
+	 */
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
 };
 
+static const struct regmap_range msm8916_wcd_digital_ranges[] = {
+	regmap_reg_range(LPASS_CDC_CLK_RX_RESET_CTL, LPASS_CDC_CLK_SD_CTL),
+	regmap_reg_range(LPASS_CDC_RX1_B1_CTL, LPASS_CDC_TOP_CTL),
+	regmap_reg_range(LPASS_CDC_DEBUG_DESER1_CTL, LPASS_CDC_DEBUG_B3_CTL_CFG),
+	regmap_reg_range(LPASS_CDC_IIR1_GAIN_B1_CTL, LPASS_CDC_IIR1_COEF_B2_CTL),
+	regmap_reg_range(LPASS_CDC_IIR2_GAIN_B1_CTL, LPASS_CDC_IIR2_COEF_B2_CTL),
+	regmap_reg_range(LPASS_CDC_CONN_RX1_B1_CTL, LPASS_CDC_CONN_TX_B1_CTL),
+	regmap_reg_range(LPASS_CDC_CONN_EQ1_B1_CTL, LPASS_CDC_CONN_TX_I2S_SD1_CTL),
+	regmap_reg_range(LPASS_CDC_TX1_VOL_CTL_TIMER, LPASS_CDC_TX1_DMIC_CTL),
+	regmap_reg_range(LPASS_CDC_TX2_VOL_CTL_TIMER, LPASS_CDC_TX2_DMIC_CTL),
+};
+
+static const struct regmap_access_table msm8916_wcd_digital_access = {
+	.yes_ranges = msm8916_wcd_digital_ranges,
+	.n_yes_ranges = ARRAY_SIZE(msm8916_wcd_digital_ranges),
+};
+
+/*
+ * Every register is read from the hardware at probe, clocks on, so the cache
+ * can answer reads while the clocks are off. They are off whenever the codec
+ * is idle: with the mclk from the ADSP (q6afe, on sdm660 and sdm670), holding
+ * it holds the ADSP awake.
+ */
 static const struct regmap_config msm8916_codec_regmap_config = {
 	.reg_bits = 32,
 	.reg_stride = 4,
 	.val_bits = 32,
 	.max_register = LPASS_CDC_TX2_DMIC_CTL,
+	.rd_table = &msm8916_wcd_digital_access,
+	.wr_table = &msm8916_wcd_digital_access,
+	.num_reg_defaults_raw = LPASS_CDC_TX2_DMIC_CTL / 4 + 1,
 	.cache_type = REGCACHE_FLAT,
 };
+
+static int msm8916_wcd_digital_clks_on(struct msm8916_wcd_digital_priv *priv)
+{
+	int ret;
+
+	ret = clk_prepare_enable(priv->ahbclk);
+	if (ret)
+		return ret;
+	ret = clk_prepare_enable(priv->mclk);
+	if (ret)
+		clk_disable_unprepare(priv->ahbclk);
+	return ret;
+}
+
+static void msm8916_wcd_digital_clks_off(struct msm8916_wcd_digital_priv *priv)
+{
+	clk_disable_unprepare(priv->mclk);
+	clk_disable_unprepare(priv->ahbclk);
+}
+
+/*
+ * Whether the block keeps its registers while the ADSP sleeps is not known,
+ * so a resume writes every one back from the cache rather than trusting
+ * regcache_sync() to know what changed. The IIR coefficient pair is an index
+ * and a data port, not storage, and is left alone.
+ */
+static int msm8916_wcd_digital_restore(struct regmap *map)
+{
+	unsigned int reg, val;
+	int i, ret;
+
+	for (i = 0; i < ARRAY_SIZE(msm8916_wcd_digital_ranges); i++) {
+		for (reg = msm8916_wcd_digital_ranges[i].range_min;
+		     reg <= msm8916_wcd_digital_ranges[i].range_max; reg += 4) {
+			switch (reg) {
+			case LPASS_CDC_IIR1_COEF_B1_CTL:
+			case LPASS_CDC_IIR1_COEF_B2_CTL:
+			case LPASS_CDC_IIR2_COEF_B1_CTL:
+			case LPASS_CDC_IIR2_COEF_B2_CTL:
+				continue;
+			}
+			ret = regmap_read(map, reg, &val);
+			if (!ret)
+				ret = regmap_write(map, reg, val);
+			if (ret)
+				return ret;
+		}
+	}
+	return 0;
+}
+
+static int msm8916_wcd_digital_runtime_suspend(struct device *dev)
+{
+	struct msm8916_wcd_digital_priv *priv = dev_get_drvdata(dev);
+
+	regcache_cache_only(priv->regmap, true);
+	msm8916_wcd_digital_clks_off(priv);
+	return 0;
+}
+
+static int msm8916_wcd_digital_runtime_resume(struct device *dev)
+{
+	struct msm8916_wcd_digital_priv *priv = dev_get_drvdata(dev);
+	int ret;
+
+	ret = msm8916_wcd_digital_clks_on(priv);
+	if (ret)
+		return ret;
+	regcache_cache_only(priv->regmap, false);
+	ret = msm8916_wcd_digital_restore(priv->regmap);
+	if (ret) {
+		regcache_cache_only(priv->regmap, true);
+		msm8916_wcd_digital_clks_off(priv);
+	}
+	return ret;
+}
 
 static int msm8916_wcd_digital_probe(struct platform_device *pdev)
 {
@@ -1179,52 +1286,79 @@ static int msm8916_wcd_digital_probe(struct platform_device *pdev)
 	if (IS_ERR(base))
 		return PTR_ERR(base);
 
-	digital_map =
-	    devm_regmap_init_mmio(&pdev->dev, base,
-				  &msm8916_codec_regmap_config);
-	if (IS_ERR(digital_map))
-		return PTR_ERR(digital_map);
-
 	ret = msm8916_wcd_digital_get_clks(pdev, priv);
 	if (ret < 0)
 		return ret;
 
-	ret = clk_prepare_enable(priv->ahbclk);
+	/* on before the regmap, which reads its defaults from the hardware */
+	ret = msm8916_wcd_digital_clks_on(priv);
 	if (ret < 0) {
-		dev_err(dev, "failed to enable ahbclk %d\n", ret);
+		dev_err(dev, "failed to enable clocks %d\n", ret);
 		return ret;
 	}
 
-	ret = clk_prepare_enable(priv->mclk);
-	if (ret < 0) {
-		dev_err(dev, "failed to enable mclk %d\n", ret);
+	digital_map =
+	    devm_regmap_init_mmio(&pdev->dev, base,
+				  &msm8916_codec_regmap_config);
+	if (IS_ERR(digital_map)) {
+		ret = PTR_ERR(digital_map);
 		goto err_clk;
 	}
+	priv->regmap = digital_map;
 
 	dev_set_drvdata(dev, priv);
+
+	/*
+	 * In use from here until the card is up, then off once idle. DAPM
+	 * holds it as well while its bias is above OFF, which lasts until the
+	 * paths are powered down, pmdown_time after a stream.
+	 */
+	pm_runtime_set_autosuspend_delay(dev, 3000);
+	pm_runtime_use_autosuspend(dev);
+	pm_runtime_get_noresume(dev);
+	pm_runtime_set_active(dev);
+	pm_runtime_enable(dev);
 
 	ret = devm_snd_soc_register_component(dev, &msm8916_wcd_digital,
 				      msm8916_wcd_digital_dai,
 				      ARRAY_SIZE(msm8916_wcd_digital_dai));
 	if (ret)
-		goto err_mclk;
+		goto err_pm;
+
+	pm_runtime_mark_last_busy(dev);
+	pm_runtime_put_autosuspend(dev);
 
 	return 0;
 
-err_mclk:
-	clk_disable_unprepare(priv->mclk);
+err_pm:
+	pm_runtime_disable(dev);
+	pm_runtime_set_suspended(dev);
+	pm_runtime_put_noidle(dev);
 err_clk:
-	clk_disable_unprepare(priv->ahbclk);
+	msm8916_wcd_digital_clks_off(priv);
 	return ret;
 }
 
 static void msm8916_wcd_digital_remove(struct platform_device *pdev)
 {
-	struct msm8916_wcd_digital_priv *priv = dev_get_drvdata(&pdev->dev);
+	struct device *dev = &pdev->dev;
+	struct msm8916_wcd_digital_priv *priv = dev_get_drvdata(dev);
 
-	clk_disable_unprepare(priv->mclk);
-	clk_disable_unprepare(priv->ahbclk);
+	pm_runtime_disable(dev);
+	if (!pm_runtime_status_suspended(dev)) {
+		/* the component goes after this: its last writes stay in the cache */
+		regcache_cache_only(priv->regmap, true);
+		msm8916_wcd_digital_clks_off(priv);
+	}
+	pm_runtime_set_suspended(dev);
+	pm_runtime_dont_use_autosuspend(dev);
 }
+
+static const struct dev_pm_ops msm8916_wcd_digital_pm_ops = {
+	RUNTIME_PM_OPS(msm8916_wcd_digital_runtime_suspend,
+		       msm8916_wcd_digital_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
+};
 
 static const struct of_device_id msm8916_wcd_digital_match_table[] = {
 	{ .compatible = "qcom,msm8916-wcd-digital-codec" },
@@ -1237,6 +1371,7 @@ static struct platform_driver msm8916_wcd_digital_driver = {
 	.driver = {
 		   .name = "msm8916-wcd-digital-codec",
 		   .of_match_table = msm8916_wcd_digital_match_table,
+		   .pm = pm_ptr(&msm8916_wcd_digital_pm_ops),
 	},
 	.probe = msm8916_wcd_digital_probe,
 	.remove = msm8916_wcd_digital_remove,
