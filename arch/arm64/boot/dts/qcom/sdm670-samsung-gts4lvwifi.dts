@@ -715,6 +715,13 @@
 };
 
 /*
+ * This tablet's GPU speed-bin fuse reads 90 (supported-hw BIT(0)): 430 MHz at most, as in
+ * Samsung's Android. Do not overclock it: allowing the 565 or 504 MHz levels of the faster
+ * bins locked the GPU up within seconds of GDM drawing (hangcheck, then a GMU fault and a
+ * reset; 2026-10-28).
+ */
+
+/*
  * Display: Samsung AMSA05RB01 AMOLED behind an Anapass ANA38401 TCON,
  * 2560x1600 as two 1280x1600 halves, DSI0 master + DSI1, command mode, TE on
  * gpio10. Supplies and GPIOs from the downstream qcom,dsi-display@0 node.
