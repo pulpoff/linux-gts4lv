@@ -2946,6 +2946,14 @@ static int sdhci_msm_runtime_suspend(struct device *dev)
 	dev_pm_opp_set_rate(dev, 0);
 	clk_bulk_disable_unprepare(ARRAY_SIZE(msm_host->bulk_clks),
 				   msm_host->bulk_clks);
+	/*
+	 * The bus clock too, as downstream gates its "bus_aggr_clk" with the
+	 * others. On SDM670 it is GCC_AGGRE_UFS_PHY_AXI_CLK, fed by GPLL0 and so
+	 * by the XO: left on, it votes the XO on in the RPMh sleep set and the
+	 * SoC never reaches XO shutdown in system suspend.
+	 */
+	if (!IS_ERR(msm_host->bus_clk))
+		clk_disable_unprepare(msm_host->bus_clk);
 
 	return sdhci_msm_ice_suspend(msm_host);
 }
@@ -2958,10 +2966,18 @@ static int sdhci_msm_runtime_resume(struct device *dev)
 	unsigned long flags;
 	int ret;
 
+	if (!IS_ERR(msm_host->bus_clk)) {
+		ret = clk_prepare_enable(msm_host->bus_clk);
+		if (ret)
+			return ret;
+	}
 	ret = clk_bulk_prepare_enable(ARRAY_SIZE(msm_host->bulk_clks),
 				       msm_host->bulk_clks);
-	if (ret)
+	if (ret) {
+		if (!IS_ERR(msm_host->bus_clk))
+			clk_disable_unprepare(msm_host->bus_clk);
 		return ret;
+	}
 	/*
 	 * Whenever core-clock is gated dynamically, it's needed to
 	 * restore the SDR DLL settings when the clock is ungated.
