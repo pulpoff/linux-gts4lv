@@ -38,6 +38,10 @@
 #include "panel-samsung-ana38401-gamma.h"
 
 #define ANA38401_SLEEP_OUT_DELAY_MS	220
+/* Display on after a cold start: a few frames after enable(), then checked (see ana38401_display_on_work) */
+#define ANA38401_DISPLAY_ON_LATE_MS	100
+#define ANA38401_DISPLAY_ON_TRIES	5
+#define ANA38401_POWER_MODE_DISPLAY_ON	BIT(2)	/* get_power_mode (0Ah) D2 */
 
 /*
  * After a warm reboot ABL leaves the panel powered but not refreshed (the
@@ -48,9 +52,9 @@ static bool handover;
 module_param(handover, bool, 0444);
 MODULE_PARM_DESC(handover, "Keep the bootloader's panel state instead of re-initialising it");
 
-static bool keep_power = true;
+static bool keep_power;
 module_param(keep_power, bool, 0644);
-MODULE_PARM_DESC(keep_power, "Blank with display off only, keeping the panel powered");
+MODULE_PARM_DESC(keep_power, "Blank with display off only, keeping the panel powered (about 90 mA more)");
 
 static int bl_mode = 1;
 module_param(bl_mode, int, 0644);
@@ -175,6 +179,9 @@ struct ana38401 {
 	int level_shown;	/* -1: nothing sent yet */
 	int level_target;
 	bool off;	/* between disable and enable: brightness is only stored */
+	/* Display on after a cold start, sent late and checked */
+	struct delayed_work display_on_work;
+	int display_on_tries;
 	/* debugfs "dcs": last read result */
 	u8 rx[32];
 	int rx_len;
@@ -301,11 +308,46 @@ static int ana38401_enable(struct drm_panel *panel)
 	if (since < ANA38401_SLEEP_OUT_DELAY_MS)
 		msleep(ANA38401_SLEEP_OUT_DELAY_MS - since);
 
-	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
-	dev_info(&ctx->dsi[0]->dev, "display on (%lld ms after reset): %d\n",
-		 ctx->reset_time ? ktime_ms_delta(ktime_get(), ctx->reset_time) : -1LL,
-		 dsi_ctx.accum_err);
-	return dsi_ctx.accum_err;
+	/* Not here: before the first frame (ana38401_display_on_work) */
+	ctx->display_on_tries = 0;
+	schedule_delayed_work(&ctx->display_on_work, msecs_to_jiffies(ANA38401_DISPLAY_ON_LATE_MS));
+	return 0;
+}
+
+/*
+ * Display on after a cold start. Sent from enable(), before the first frame
+ * had reached the panel, it lit for an instant and then fell back to display
+ * off (get_power_mode read 00h, the screen stayed black), where a 29h sent a
+ * second later stayed on. Downstream sends it from its frame-update event,
+ * after the first frame and 220 ms after TCON_RDY; here it goes a few frames
+ * after enable(), and again while the panel does not report it on.
+ */
+static void ana38401_display_on_work(struct work_struct *work)
+{
+	struct ana38401 *ctx = container_of(to_delayed_work(work), struct ana38401, display_on_work);
+	struct mipi_dsi_device *dsi = ctx->dsi[0];
+	u8 mode = 0;
+	int ret;
+
+	if (ctx->off)
+		return;
+	ret = mipi_dsi_dcs_set_display_on(dsi);
+	if (!ret) {
+		msleep(40);	/* two frames */
+		ret = mipi_dsi_set_maximum_return_packet_size(dsi, 1);
+	}
+	if (!ret)
+		ret = mipi_dsi_dcs_get_power_mode(dsi, &mode);
+	if (!ret && (mode & ANA38401_POWER_MODE_DISPLAY_ON)) {
+		dev_info(&dsi->dev, "display on (%lld ms after reset, try %d)\n",
+			 ktime_ms_delta(ktime_get(), ctx->reset_time), ctx->display_on_tries + 1);
+		return;
+	}
+	if (++ctx->display_on_tries < ANA38401_DISPLAY_ON_TRIES && !ctx->off) {
+		schedule_delayed_work(&ctx->display_on_work, msecs_to_jiffies(ANA38401_DISPLAY_ON_LATE_MS));
+		return;
+	}
+	dev_warn(&dsi->dev, "display on did not take: power mode %02x, %d\n", mode, ret);
 }
 
 static int ana38401_disable(struct drm_panel *panel)
@@ -319,6 +361,8 @@ static int ana38401_disable(struct drm_panel *panel)
 	 */
 	ctx->off = true;
 	cancel_delayed_work_sync(&ctx->fade_work);
+	/* and no late display on while the link goes down */
+	cancel_delayed_work_sync(&ctx->display_on_work);
 	ctx->level_shown = -1;
 	mipi_dsi_dcs_set_display_off_multi(&dsi_ctx);
 	mipi_dsi_msleep(&dsi_ctx, 100);
@@ -330,9 +374,11 @@ static int ana38401_unprepare(struct drm_panel *panel)
 	struct ana38401 *ctx = to_ana38401(panel);
 
 	/*
-	 * Blanking keeps the panel powered: a cold start (reset, init) ends
-	 * black with this DSI host, which forces the HS clock before the
-	 * panel's TCON is ready. Display off in disable() is the blank.
+	 * Blanking powers the panel off, as downstream does (display off, then
+	 * reset and VDD off), and the next prepare() runs the whole power-on
+	 * sequence. Kept powered with the display off, the TCON and panel still
+	 * draw about 90 mA from the battery, in system suspend as well; with
+	 * keep_power, display off in disable() is the blank.
 	 */
 	if (keep_power) {
 		ctx->blanked = true;
@@ -627,6 +673,9 @@ static int ana38401_probe(struct mipi_dsi_device *dsi)
 	 */
 	ctx->off = true;
 	ret = devm_delayed_work_autocancel(dev, &ctx->fade_work, ana38401_fade_work);
+	if (ret)
+		return ret;
+	ret = devm_delayed_work_autocancel(dev, &ctx->display_on_work, ana38401_display_on_work);
 	if (ret)
 		return ret;
 
