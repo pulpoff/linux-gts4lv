@@ -468,6 +468,12 @@ for d in vol:
     fds[d.fd] = True
 if not fds:
     raise SystemExit("no input devices")
+# GTS4LV_KEY_DEBUG=1: every key event in the log, with the device it came from
+KEY_DEBUG = os.environ.get("GTS4LV_KEY_DEBUG") == "1"
+if KEY_DEBUG:
+    for d in [pwr_dev, *vol] + ([tap_dev] if tap else []):
+        if d:
+            log("key debug: fd", d.fd, d.path, d.name)
 ui = evdev.UInput({ecodes.EV_KEY: [ecodes.KEY_VOLUMEUP, ecodes.KEY_VOLUMEDOWN],
                    ecodes.EV_SW: [ecodes.SW_LID]}, name="gts4lv volume keys")
 def seat_active():
@@ -541,6 +547,8 @@ while True:
     for fd in select.select(list(fds), [], [])[0]:
         sec, usec, typ, code, value = struct.unpack(FMT, os.read(fd, size))
         at = sec + usec / 1e6
+        if KEY_DEBUG and typ == EV_KEY:
+            log("key debug: fd", fd, "code", code, "value", value, "at %.3f" % at)
         if fds[fd]:
             if typ == EV_KEY and code in VOL_SWAP:
                 if value == 1:
