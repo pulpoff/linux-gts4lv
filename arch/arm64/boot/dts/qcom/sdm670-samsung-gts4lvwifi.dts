@@ -107,7 +107,7 @@
 		};
 	};
 
-	i2c-charger {
+	i2c_charger: i2c-charger {
 		compatible = "i2c-gpio";
 		sda-gpios = <&tlmm 43 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
 		scl-gpios = <&tlmm 44 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
@@ -484,9 +484,25 @@
 	status = "okay";
 };
 
-/* Secure-world GPIOs on SDM670 phones; touching them resets the SoC. */
+/*
+ * POGO keyboard (stm32-pogo-kbd, nodes at the end of this file). Off until it
+ * has been tested on the tablet, so the default DTB stays as it was: uncomment
+ * this, or build the DTB with -DGTS4LV_POGO_KEYBOARD.
+ */
+/* #define GTS4LV_POGO_KEYBOARD */
+
+/*
+ * Secure-world GPIOs on SDM670 phones; touching them resets the SoC. That is
+ * the Pixel 3a's list; this tablet's own kernel drives gpio0/1 (QUP0 SE0 I2C,
+ * the POGO keyboard) and gpio2 (the POGO FPGA's CRESET_B), so with the POGO
+ * keyboard only gpio3 of the first four stays reserved.
+ */
 &tlmm {
+#ifdef GTS4LV_POGO_KEYBOARD
+	gpio-reserved-ranges = <3 1>, <81 4>;
+#else
 	gpio-reserved-ranges = <0 4>, <81 4>;
+#endif
 
 	hall_default: hall-state {
 		pins = "gpio124";
@@ -1292,6 +1308,191 @@
 &{/cpus} {
 	cpu-model-name = "Qualcomm Snapdragon 670";
 };
+
+/*
+ * POGO keyboard (Book Cover Keyboard EJ-FT720), from the downstream stm32@2a
+ * (on qupv3_se0_i2c) and pogo_fpga@1 (on qupv3_se8_spi) nodes; the driver is
+ * stm32-pogo-kbd. The keyboard's STM32 answers at 0x2a only once the Lattice
+ * iCE5LP4K bridge has been loaded over SPI; attach is the SM5705 MUIC's ID
+ * ADC reading 49.9 kOhm. The FPGA's chip select is a GPIO: native CS0 is the
+ * (unused) DBMD8 voice DSP's, native CS1 is not pinned out.
+ */
+#ifdef GTS4LV_POGO_KEYBOARD
+/ {
+	pogo_fpga_vcc: regulator-pogo-fpga {
+		compatible = "regulator-fixed";
+		regulator-name = "pogo_fpga_ldo";
+		gpio = <&tlmm 116 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		pinctrl-0 = <&pogo_fpga_ldo_default>;
+		pinctrl-names = "default";
+	};
+
+	pogo_kbd_vdd: regulator-pogo-kbd {
+		compatible = "regulator-fixed";
+		regulator-name = "pogo_kbd_3v3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		gpio = <&tlmm 89 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		pinctrl-0 = <&pogo_kbd_ldo_default>;
+		pinctrl-names = "default";
+	};
+};
+
+&qup_i2c0_default {
+	drive-strength = <2>;
+	bias-disable;
+};
+
+&qup_spi8_default {
+	drive-strength = <6>;
+	bias-disable;
+};
+
+&i2c0 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	keyboard@2a {
+		compatible = "samsung,gts4lv-pogo-kbd";
+		reg = <0x2a>;
+		interrupts-extended = <&tlmm 108 IRQ_TYPE_LEVEL_LOW>;
+		pinctrl-0 = <&pogo_kbd_int_default>;
+		pinctrl-names = "default";
+		vdd-supply = <&pogo_kbd_vdd>;
+		samsung,pogo-fpga = <&pogo_fpga>;
+		samsung,muic-i2c-bus = <&i2c_charger>;
+
+		keypad,num-rows = <8>;
+		keypad,num-columns = <10>;
+		linux,keymap = <MATRIX_KEY(0, 2, KEY_Z)
+				MATRIX_KEY(0, 3, KEY_102ND)
+				MATRIX_KEY(0, 4, KEY_V)
+				MATRIX_KEY(0, 5, KEY_M)
+				MATRIX_KEY(0, 6, KEY_DOWN)
+				MATRIX_KEY(0, 8, KEY_SPACE)
+				MATRIX_KEY(0, 9, KEY_UP)
+				MATRIX_KEY(1, 0, KEY_KEYBOARD)	/* downstream 706, Samsung SIP_ON_OFF */
+				MATRIX_KEY(1, 1, KEY_LEFTMETA)
+				MATRIX_KEY(1, 2, KEY_A)
+				MATRIX_KEY(1, 3, KEY_X)
+				MATRIX_KEY(1, 4, KEY_B)
+				MATRIX_KEY(1, 5, KEY_N)
+				MATRIX_KEY(1, 6, KEY_COMMA)
+				MATRIX_KEY(1, 7, KEY_DOT)
+				MATRIX_KEY(1, 8, KEY_SLASH)
+				MATRIX_KEY(1, 9, KEY_RIGHTBRACE)
+				MATRIX_KEY(2, 1, KEY_HANGEUL)
+				MATRIX_KEY(2, 2, KEY_Q)
+				MATRIX_KEY(2, 3, KEY_S)
+				MATRIX_KEY(2, 4, KEY_F)
+				MATRIX_KEY(2, 5, KEY_J)
+				MATRIX_KEY(2, 6, KEY_K)
+				MATRIX_KEY(2, 7, KEY_L)
+				MATRIX_KEY(2, 8, KEY_SEMICOLON)
+				MATRIX_KEY(2, 9, KEY_ENTER)
+				MATRIX_KEY(3, 1, KEY_LEFTALT)
+				MATRIX_KEY(3, 2, KEY_TAB)
+				MATRIX_KEY(3, 3, KEY_W)
+				MATRIX_KEY(3, 4, KEY_G)
+				MATRIX_KEY(3, 5, KEY_H)
+				MATRIX_KEY(3, 6, KEY_I)
+				MATRIX_KEY(3, 7, KEY_APOSTROPHE)
+				MATRIX_KEY(3, 8, KEY_P)
+				MATRIX_KEY(3, 9, KEY_BACKSLASH)
+				MATRIX_KEY(4, 0, KEY_CAPSLOCK)
+				MATRIX_KEY(4, 1, KEY_RIGHTALT)
+				MATRIX_KEY(4, 2, KEY_1)
+				MATRIX_KEY(4, 3, KEY_2)
+				MATRIX_KEY(4, 4, KEY_R)
+				MATRIX_KEY(4, 5, KEY_U)
+				MATRIX_KEY(4, 6, KEY_8)
+				MATRIX_KEY(4, 7, KEY_O)
+				MATRIX_KEY(4, 8, KEY_0)
+				MATRIX_KEY(4, 9, KEY_BACKSLASH)
+				MATRIX_KEY(5, 1, KEY_LEFTCTRL)
+				MATRIX_KEY(5, 2, KEY_GRAVE)
+				MATRIX_KEY(5, 3, KEY_RIGHT)
+				MATRIX_KEY(5, 4, KEY_T)
+				MATRIX_KEY(5, 5, KEY_Y)
+				MATRIX_KEY(5, 7, KEY_LEFTBRACE)
+				MATRIX_KEY(5, 8, KEY_BACKSPACE)
+				MATRIX_KEY(5, 9, KEY_MINUS)
+				MATRIX_KEY(6, 0, KEY_RIGHTSHIFT)
+				MATRIX_KEY(6, 1, KEY_LEFT)
+				MATRIX_KEY(6, 2, KEY_D)
+				MATRIX_KEY(6, 3, KEY_C)
+				MATRIX_KEY(6, 4, KEY_4)
+				MATRIX_KEY(6, 5, KEY_7)
+				MATRIX_KEY(6, 7, KEY_9)
+				MATRIX_KEY(6, 8, KEY_3)
+				MATRIX_KEY(6, 9, KEY_E)
+				MATRIX_KEY(7, 0, KEY_LEFTSHIFT)
+				MATRIX_KEY(7, 4, KEY_5)
+				MATRIX_KEY(7, 6, KEY_6)
+				MATRIX_KEY(7, 7, KEY_EQUAL)>;
+	};
+};
+
+&spi8 {
+	cs-gpios = <0>, <&tlmm 105 GPIO_ACTIVE_LOW>;
+	pinctrl-0 = <&qup_spi8_default>, <&pogo_fpga_cs_default>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	pogo_fpga: fpga@1 {
+		compatible = "samsung,gts4lv-pogo-fpga";
+		reg = <1>;
+		spi-max-frequency = <12000000>;
+		vcc-supply = <&pogo_fpga_vcc>;
+		creset-gpios = <&tlmm 2 GPIO_ACTIVE_LOW>;
+		cdone-gpios = <&tlmm 107 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&tlmm 106 GPIO_ACTIVE_LOW>;
+		firmware-name = "samsung/gts4lv/pogo_fpga.fw";
+		pinctrl-0 = <&pogo_fpga_default>;
+		pinctrl-names = "default";
+	};
+};
+
+&tlmm {
+	pogo_kbd_int_default: pogo-kbd-int-state {
+		pins = "gpio108";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-up;
+	};
+
+	pogo_kbd_ldo_default: pogo-kbd-ldo-state {
+		pins = "gpio89";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	pogo_fpga_ldo_default: pogo-fpga-ldo-state {
+		pins = "gpio116";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	pogo_fpga_cs_default: pogo-fpga-cs-state {
+		pins = "gpio105";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	/* CRESET_B, logic reset, CDONE */
+	pogo_fpga_default: pogo-fpga-state {
+		pins = "gpio2", "gpio106", "gpio107";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+};
+#endif /* GTS4LV_POGO_KEYBOARD */
 
 /*
  * USB-C DisplayPort (HDMI docks), wired as on stock: the QMP USB3-DP PHY gives

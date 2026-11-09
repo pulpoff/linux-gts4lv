@@ -602,6 +602,21 @@ config KEYBOARD_ST_KEYSCAN
 	  To compile this driver as a module, choose M here: the
 	  module will be called st-keyscan.
 
+config KEYBOARD_STM32_POGO
+	tristate "Samsung Galaxy Tab S5e POGO keyboard"
+	depends on I2C && SPI && OF
+	depends on GPIOLIB
+	select FW_LOADER
+	select INPUT_MATRIXKMAP
+	help
+	  Say Y here to use the Book Cover Keyboard (EJ-FT720) on the
+	  Samsung Galaxy Tab S5e (SM-T720). The keyboard's STM32 MCU is
+	  reached over I2C through an iCE40 FPGA on the tablet, which this
+	  driver loads with Samsung's bitstream over SPI.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called stm32-pogo-kbd.
+
 config KEYBOARD_SUNKBD
 	tristate "Sun Type 4 and Type 5 keyboard"
 	select SERIO
