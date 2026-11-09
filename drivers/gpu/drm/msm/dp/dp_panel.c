@@ -211,6 +211,14 @@ static int msm_dp_panel_read_dpcd(struct msm_dp_panel *msm_dp_panel)
 	return rc;
 }
 
+/*
+ * Cap on bits per pixel. Not every sink takes deep colour even when its EDID says so:
+ * a Parade PS176 DP-to-HDMI dock (2026-11-08) shows nothing at 30 bpp, a picture at 24.
+ */
+static unsigned int dp_max_bpp = 30;
+module_param(dp_max_bpp, uint, 0644);
+MODULE_PARM_DESC(dp_max_bpp, "Highest DP bits per pixel to use (18, 24 or 30)");
+
 static u32 msm_dp_panel_get_supported_bpp(struct msm_dp_panel *msm_dp_panel,
 		u32 mode_edid_bpp, u32 mode_pclk_khz)
 {
@@ -218,7 +226,7 @@ static u32 msm_dp_panel_get_supported_bpp(struct msm_dp_panel *msm_dp_panel,
 	const u32 max_supported_bpp = 30, min_supported_bpp = 18;
 	u32 bpp, data_rate_khz;
 
-	bpp = min(mode_edid_bpp, max_supported_bpp);
+	bpp = min3(mode_edid_bpp, max_supported_bpp, (u32)dp_max_bpp);
 
 	link_info = &msm_dp_panel->link_info;
 	data_rate_khz = link_info->num_lanes * link_info->rate * 8;
