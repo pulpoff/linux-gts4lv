@@ -11,7 +11,14 @@ to 7.2.13 with the stable incremental patches), plus the tablet changes listed b
 New in this version
 ===================
 
-* **Sleep costs less.** Asleep, the tablet drew 220-250 mA: the ADSP never power-collapsed, and
+* **HDMI out over USB-C, with sound.** The USB-C port's DisplayPort alt mode drives a TV through a
+  USB-C-to-HDMI dock: tested on an LG TV through a Parade PS176 dock at 4096x2160 30 Hz and 1920x1080
+  120 Hz, and the TV plays the tablet's sound. GDM shows its login on the TV when it is connected at boot,
+  the touchscreen can drive the TV, and while docked the power key only switches the panel off and on. See
+  Display: DisplayPort over USB-C, and Audio.
+* **Book Cover Keyboard driver** (`stm32-pogo-kbd`, new), not yet tested on the tablet: its device tree
+  nodes stay out of the DTB unless it is built with `-DGTS4LV_POGO_KEYBOARD`.
+* Earlier (November 6): **sleep costs less.** Asleep, the tablet drew 220-250 mA: the ADSP never power-collapsed, and
   the SoC's 19.2 MHz crystal never stopped. The digital codec's MCLK and the speaker link's bit clock held
   the ADSP, and a clock leaked by the touchscreen's I2C bus held the crystal; all three are fixed (see
   Power and reset and Audio). The SM5705 fuel gauge's poll no longer counts as a wakeup event either.
@@ -27,6 +34,7 @@ What works
 | Part | State |
 | --- | --- |
 | Display | 2560x1600 AMOLED on the MSM display engine, brightness with Samsung's gamma per level, fades |
+| HDMI | DisplayPort alt mode on the USB-C port, through a USB-C-to-HDMI dock: up to 4096x2160 30 Hz, with sound |
 | GPU | Adreno 615, OpenGL ES 3.2 / GL 4.6 and Vulkan (Turnip) |
 | Touchscreen | STM FTS1BA90A, through a small userspace driver (`mobian/gts4lv-touchd.c`) |
 | Wi-Fi | WCN3990, 2.4 and 5 GHz |
@@ -45,7 +53,10 @@ Not done: rear camera autofocus, the cameras' Samsung colour tuning, the SoC's d
 the CPUs power down, but the chip does not yet reach AOSS sleep or CX collapse), 24-bit audio playback
 (16-bit only), and USB fast charging. The
 cameras can stop delivering frames after many starts and stops; that is being looked at. OTG host mode is
-in place but not yet tested with a device.
+in place but not yet tested with a device. HDMI: only one plug orientation of the USB-C cable has been tried,
+the tested dock needs 24 bits per pixel (`msm.dp_max_bpp=24`, no picture at 30), and unplugging and
+replugging the dock after the panel was switched off can freeze both screens until a reboot (a fix is written,
+not yet tested).
 
 Booting it
 ==========
@@ -101,6 +112,37 @@ Display: Samsung AMSA05RB01 panel behind an Anapass ANA38401 (`panel-samsung-ana
 * `dispcc-sdm845`: the MDP clock source uses the no-init-park ops so the running display survives
   probe.
 
+Display: DisplayPort over USB-C
+-------------------------------
+
+* **Device tree.** `sdm670.dtsi` gains the QMP USB3-DP combo PHY and the DisplayPort controller (SDM845's:
+  the same registers, interrupt and clocks). The tablet is wired as on stock: all four SuperSpeed lanes go
+  to DP through an NXP PTN36502 redriver on QUP0 SE3, the SBU lines through a GPIO mux, and DP audio is
+  MultiMedia4 to `DISPLAY_PORT_RX`. USB stays at 2.0 meanwhile, as it is on this port anyway (below).
+* **Hot plug from the S2MM005.** The Type-C controller runs the alt mode with the dock. The USB daemon starts
+  it and reads the result over I2C, as Samsung's `ccic_alternate` does, and hands orientation, pin
+  assignment and HPD to the `gts4lv-dp-altmode` glue module (in `mobian/kit/`). That module sets the Type-C
+  switch and mux and signals HPD to the DP controller through an aux-hpd bridge. The redriver's
+  orientation is the inverse of what the S2MM005 reports.
+* **dp_ctrl**: with HPD from such a bridge the controller's own HPD state stays 0, so a failed link
+  training gave up instead of falling back to a lower rate or fewer lanes. It now asks the sink over AUX
+  whether it is still there.
+* **dp_panel**: `msm.dp_max_bpp` caps the bits per pixel. The tested dock's EDID offers deep colour, but it
+  shows nothing at 30 bpp; the image sets 24.
+* **DPU**:
+  * **One primary and one cursor plane per CRTC** (`possible_crtcs`) instead of every plane on every CRTC.
+    Mutter 51 hands out primary planes in the order of its own monitor configuration and never reads the
+    kernel's. With every plane allowed everywhere it asked to swap the panel's and the TV's planes in one
+    commit, which the DRM core refuses ("switching CRTC directly"): with the TV connected at boot the login
+    stayed black on both screens.
+  * **CRTCs without DSPPs.** SDM670 has two DSPPs, on LM_0 and LM_1, and the dual-DSI panel holds both,
+    while a 4096-wide mode needs LM_2 and LM_5. Mutter sets a gamma ramp on every CRTC, which asks for a
+    DSPP, so the TV's modeset failed. A CRTC that cannot get DSPPs is now reserved without them (no colour
+    management on it); the "LM_2, invalid DSPP_-1" lines of each such modeset are the first attempt.
+  * A CRTC reserved without DSPPs no longer keeps the DSPP pointers of its previous state (the state is a
+    copy), and no longer frees DSPP_0 from the CRTC that owns it. Both made the panel and the TV program the
+    same DSPP after a replug.
+
 Cameras
 -------
 
@@ -120,6 +162,11 @@ Audio
   codec (a stream, or DAPM while its bias is above OFF), with a 3 s autosuspend. The register cache is
   filled from the hardware at probe and every register is written back on resume. `idle_bias_on` is gone:
   with no bias to set it only kept DAPM's runtime PM reference forever.
+* **sm8250, DisplayPort**: SDM670's ADSP acknowledges `AFE_PORT_CMD_DEVICE_START` for the DP port only once
+  the DP controller's audio engine runs, and `AFE_PORT_CMD_DEVICE_STOP` only while it still runs. ASoC
+  prepares the CPU DAI (the AFE port) before the codec DAI (`hdmi-codec`, which starts the engine) and shuts
+  the codec DAI down first, so both commands timed out (-110) and the port stayed started. The link's
+  prepare now starts the engine first, and its hw_free stops the port while the engine still runs.
 * **sm8250**: a back-end shutdown that sets the bit clock its startup turned on back to 0. That clock is an
   AFE vote in the ADSP, and after the first stream it kept the ADSP awake for good.
 
@@ -205,6 +252,9 @@ daemon (blank and lock, and the sleep policy: two minutes after the screen goes 
 audio plays, Wi-Fi, Bluetooth, the sensor stack and touch off for the sleep), the USB role daemon, LineageOS's firmware (read from the tablet's own partitions at boot), hexagonrpcd and libssc for the
 sensors, and a patched iio-sensor-proxy (a sensor claimed while it was still being opened never started; the
 light level is smoothed). Also there: Chromium's flags and a Shell extension that opens the on-screen keyboard
-for its text fields, the Venus codec under the device names Chromium looks for, the tablet's own Wi-Fi MAC from
+for its text fields, for HDMI the DP alt mode in the USB daemon with its `gts4lv-dp-altmode` module, a GDM
+monitor layout that puts the login on the TV (`monitors-tv.xml`), a user service that maps the touchscreen
+to the TV at the login screen, `gts4lv-panel` for the power key while docked, and an HDMI device in the
+UCM profile, the Venus codec under the device names Chromium looks for, the tablet's own Wi-Fi MAC from
 the EFS partition, and `zip/`, which turns the running system into a zip for LineageOS recovery's "Apply
 update". They are in [`mobian/`](mobian/), with the scripts that build the image and U-Boot's boot menu.
