@@ -867,6 +867,14 @@
 			};
 		};
 
+		/* pcm 3: HDMI through the dock (DP audio, the UCM's "HDMI" device) */
+		mm4-dai-link {
+			link-name = "MultiMedia4";
+			cpu {
+				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA4>;
+			};
+		};
+
 		sec-tdm-rx-link {
 			link-name = "Speaker Playback";
 			cpu {
@@ -891,6 +899,19 @@
 			};
 			codec {
 				sound-dai = <&pm660l_codec 0>, <&lpass_codec 0>;
+			};
+		};
+
+		dp-dai-link {
+			link-name = "DisplayPort Playback";
+			cpu {
+				sound-dai = <&q6afedai DISPLAY_PORT_RX>;
+			};
+			platform {
+				sound-dai = <&q6routing>;
+			};
+			codec {
+				sound-dai = <&mdss_dp>;
 			};
 		};
 
@@ -1076,6 +1097,10 @@
 
 	dai@2 {
 		reg = <2>;
+	};
+
+	dai@3 {
+		reg = <3>;
 	};
 };
 
@@ -1266,4 +1291,186 @@
 /* the SoC by its marketing name, for /proc/cpuinfo's "model name" (arm64 cpuinfo.c) */
 &{/cpus} {
 	cpu-model-name = "Qualcomm Snapdragon 670";
+};
+
+/*
+ * USB-C DisplayPort (HDMI docks), wired as on stock: the QMP USB3-DP PHY gives
+ * all four SS lanes to DP (dwc3 stays USB 2.0, as above), through an NXP
+ * PTN36502 redriver on QUP0 SE3 (stock combo,redriver_en = gpio16, which ABL
+ * leaves high; gpio15 is the redriver's interrupt). AUX runs over SBU through
+ * a switch on PM660L GPIO3 (enable, active low) and GPIO4 (select), then
+ * through the redriver's AUX crossbar.
+ * There is no HPD wire: HPD only exists in the DP VDMs. The S2MM005 has no
+ * driver, so gts4lv-usb-otgd runs the alt mode and drives the connector below
+ * (gts4lv-dp-altmode) through sysfs: orientation, mode and hpd.
+ *
+ * The redriver and the PHY both flip with the plug, as on the Fairphone 5, but
+ * from the orientation gts4lv-usb-otgd writes, which is the inverse of the one
+ * the S2MM005 reports. The SBU select stays low. Measured 2026-11-08 with a
+ * 2-lane dock (Parade PS176): AUX works when s2mm005 ^ select ^ redriver = 1,
+ * and the link trains (HBR2, both lanes EQ) only with redriver = PHY = the
+ * inverse of the S2MM005's orientation. With either one following the S2MM005,
+ * one dock lane gets the redriver's USB path and never symbol-locks.
+ *
+ * The SS port links the connector to the PHY and to the redriver side by side,
+ * not in series as wired: the DP bridge chain (DP -> PHY -> connector) then
+ * does not pass through the redriver, so a redriver that fails to probe costs
+ * DP but cannot hold up the msm DRM device, the panel included.
+ */
+/ {
+	vreg_redriver_1p8: redriver-1p8-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "redriver_1p8";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+
+		gpio = <&tlmm 16 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <10000>;
+		regulator-boot-on;
+
+		pinctrl-0 = <&redriver_en_default>;
+		pinctrl-names = "default";
+	};
+
+	typec-dp-altmode {
+		compatible = "samsung,gts4lv-dp-altmode";
+
+		connector {
+			compatible = "usb-c-connector";
+			power-role = "dual";
+			data-role = "dual";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@1 {
+					reg = <1>;
+					#address-cells = <1>;
+					#size-cells = <0>;
+
+					usb_con_ss_phy: endpoint@0 {
+						reg = <0>;
+						remote-endpoint = <&usb_1_qmpphy_out>;
+					};
+
+					usb_con_ss_redriver: endpoint@1 {
+						reg = <1>;
+						remote-endpoint = <&redriver_ss_out>;
+					};
+				};
+
+				port@2 {
+					reg = <2>;
+
+					usb_con_sbu: endpoint {
+						remote-endpoint = <&sbu_mux_in>;
+					};
+				};
+			};
+		};
+	};
+
+	sbu-mux {
+		compatible = "gpio-sbu-mux";
+
+		enable-gpios = <&pm660l_gpios 3 GPIO_ACTIVE_LOW>;
+		/*
+		 * Not an orientation switch (see above): the driver then leaves
+		 * select at its probe value, logical low, the low level.
+		 */
+		select-gpios = <&pm660l_gpios 4 GPIO_ACTIVE_HIGH>;
+
+		pinctrl-0 = <&dp_aux_en_default>, <&dp_aux_sel_default>;
+		pinctrl-names = "default";
+
+		mode-switch;
+
+		port {
+			sbu_mux_in: endpoint {
+				remote-endpoint = <&usb_con_sbu>;
+			};
+		};
+	};
+};
+
+&i2c3 {
+	status = "okay";
+
+	typec-mux@1a {
+		compatible = "nxp,ptn36502";
+		reg = <0x1a>;
+
+		vdd18-supply = <&vreg_redriver_1p8>;
+
+		retimer-switch;
+		orientation-switch;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+
+				redriver_ss_out: endpoint {
+					remote-endpoint = <&usb_con_ss_redriver>;
+				};
+			};
+		};
+	};
+};
+
+&qup_i2c3_default {
+	drive-strength = <2>;
+	bias-disable;
+};
+
+&mdss_dp {
+	/* its hdmi-codec is the DisplayPort Playback link's codec */
+	#sound-dai-cells = <0>;
+
+	status = "okay";
+};
+
+&usb_1_qmpphy {
+	vdda-phy-supply = <&vreg_l1b_0p925>;
+	vdda-pll-supply = <&vreg_l1a_1p225>;
+
+	mode-switch;
+
+	status = "okay";
+};
+
+&usb_1_qmpphy_out {
+	remote-endpoint = <&usb_con_ss_phy>;
+};
+
+&pm660l_gpios {
+	/* Stock sde_dp_aux_en/sel: off (high) until DP needs AUX; select low (see above) */
+	dp_aux_en_default: dp-aux-en-state {
+		pins = "gpio3";
+		function = "normal";
+		power-source = <0>;
+		output-high;
+		bias-disable;
+	};
+
+	dp_aux_sel_default: dp-aux-sel-state {
+		pins = "gpio4";
+		function = "normal";
+		power-source = <0>;
+		output-low;
+		bias-disable;
+	};
+};
+
+&tlmm {
+	redriver_en_default: redriver-en-state {
+		pins = "gpio16";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
 };
