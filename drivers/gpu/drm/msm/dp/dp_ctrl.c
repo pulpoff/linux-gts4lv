@@ -2263,6 +2263,22 @@ static bool msm_dp_ctrl_channel_eq_ok(struct msm_dp_ctrl_private *ctrl)
 	return drm_dp_channel_eq_ok(link_status, num_lanes);
 }
 
+/*
+ * Whether the sink is still there after a failed training. The controller's HPD
+ * state only follows a sink on its HPD pin: with HPD from elsewhere (USB-C alt
+ * mode through an aux-hpd bridge, no HPD wire) it stays 0, and the fallback to a
+ * lower rate or fewer lanes never ran. Then ask the sink itself over AUX.
+ */
+static bool msm_dp_ctrl_sink_present(struct msm_dp_ctrl_private *ctrl)
+{
+	u8 rev;
+
+	if (msm_dp_aux_is_link_connected(ctrl->aux))
+		return true;
+
+	return !drm_dp_dpcd_read_byte(ctrl->aux, DP_DPCD_REV, &rev);
+}
+
 int msm_dp_ctrl_on_link(struct msm_dp_ctrl *msm_dp_ctrl)
 {
 	int rc = 0;
@@ -2313,7 +2329,7 @@ int msm_dp_ctrl_on_link(struct msm_dp_ctrl *msm_dp_ctrl)
 			break;
 		} else if (training_step == DP_TRAINING_1) {
 			/* link train_1 failed */
-			if (!msm_dp_aux_is_link_connected(ctrl->aux))
+			if (!msm_dp_ctrl_sink_present(ctrl))
 				break;
 
 			drm_dp_dpcd_read_link_status(ctrl->aux, link_status);
@@ -2338,7 +2354,7 @@ int msm_dp_ctrl_on_link(struct msm_dp_ctrl *msm_dp_ctrl)
 			}
 		} else if (training_step == DP_TRAINING_2) {
 			/* link train_2 failed */
-			if (!msm_dp_aux_is_link_connected(ctrl->aux))
+			if (!msm_dp_ctrl_sink_present(ctrl))
 				break;
 
 			drm_dp_dpcd_read_link_status(ctrl->aux, link_status);
