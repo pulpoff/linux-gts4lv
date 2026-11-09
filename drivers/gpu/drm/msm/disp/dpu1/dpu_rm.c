@@ -418,8 +418,12 @@ static int _dpu_rm_reserve_lms(struct dpu_rm *rm,
 	for (i = 0; i < lm_count; i++) {
 		global_state->mixer_to_crtc_id[lm_idx[i]] = crtc_id;
 		global_state->pingpong_to_crtc_id[pp_idx[i]] = crtc_id;
-		global_state->dspp_to_crtc_id[dspp_idx[i]] =
-			topology->num_dspp ? crtc_id : 0;
+		/*
+		 * gts4lv: only with DSPPs. dspp_idx[] starts as 0, so a CRTC reserved without them
+		 * wrote dspp_to_crtc_id[0] = 0 and released DSPP_0 from the panel that drives it.
+		 */
+		if (topology->num_dspp)
+			global_state->dspp_to_crtc_id[dspp_idx[i]] = crtc_id;
 
 		trace_dpu_rm_reserve_lms(lm_idx[i] + LM_0, crtc_id,
 					 pp_idx[i] + PINGPONG_0);

@@ -1492,8 +1492,12 @@ static int dpu_crtc_assign_resources(struct drm_crtc *crtc,
 
 		cstate->mixers[i].hw_lm = to_dpu_hw_mixer(hw_lm[i]);
 		cstate->mixers[i].lm_ctl = to_dpu_hw_ctl(hw_ctl[ctl_idx]);
-		if (i < num_dspp)
-			cstate->mixers[i].hw_dspp = to_dpu_hw_dspp(hw_dspp[i]);
+		/*
+		 * gts4lv: always set, NULL included. The state is a kmemdup of the old one, so a CRTC
+		 * that held DSPPs and is now reserved without them (dpu_rm_reserve retry above) kept
+		 * programming the panel's DSPP_0/1: kickoff timeouts on both screens after a replug.
+		 */
+		cstate->mixers[i].hw_dspp = i < num_dspp ? to_dpu_hw_dspp(hw_dspp[i]) : NULL;
 	}
 
 	cstate->num_mixers = num_lm;
