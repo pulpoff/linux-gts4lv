@@ -814,6 +814,7 @@ static int _dpu_kms_drm_obj_init(struct dpu_kms *dpu_kms)
 
 	int primary_planes_idx = 0, cursor_planes_idx = 0, i, ret;
 	int max_crtc_count;
+	unsigned long possible_crtcs;
 	dev = dpu_kms->dev;
 	priv = dev->dev_private;
 	catalog = dpu_kms->catalog;
@@ -851,11 +852,24 @@ static int _dpu_kms_drm_obj_init(struct dpu_kms *dpu_kms)
 			  type, catalog->sspp[i].features,
 			  catalog->sspp[i].features & BIT(DPU_SSPP_CURSOR));
 
+		/*
+		 * gts4lv: a primary or cursor plane only on the CRTC it is created for. mutter 51 hands
+		 * out primary planes in its config's order and never reads the kernel's; with every plane
+		 * usable everywhere it asked to swap fbcon's plane-0/plane-1 between the panel and the TV
+		 * in one commit, which the core refuses ("switching CRTC directly"): black login.
+		 */
+		if (type == DRM_PLANE_TYPE_PRIMARY)
+			possible_crtcs = BIT(primary_planes_idx);
+		else if (type == DRM_PLANE_TYPE_CURSOR)
+			possible_crtcs = BIT(cursor_planes_idx);
+		else
+			possible_crtcs = (1UL << max_crtc_count) - 1;
+
 		if (dpu_use_virtual_planes)
-			plane = dpu_plane_init_virtual(dev, type, (1UL << max_crtc_count) - 1);
+			plane = dpu_plane_init_virtual(dev, type, possible_crtcs);
 		else
 			plane = dpu_plane_init(dev, catalog->sspp[i].id, type,
-					       (1UL << max_crtc_count) - 1);
+					       possible_crtcs);
 		if (IS_ERR(plane)) {
 			DPU_ERROR("dpu_plane_init failed\n");
 			ret = PTR_ERR(plane);
