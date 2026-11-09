@@ -291,6 +291,25 @@ static int sm8250_snd_prepare(struct snd_pcm_substream *substream)
 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct sm8250_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
 
+	/*
+	 * gts4lv (sdm670): the ADSP holds AFE_PORT_CMD_DEVICE_START for the DP port until the DP
+	 * controller's audio engine runs, the q6afe ack times out (-110) and the port stays started
+	 * (EALREADY from then on). ASoC prepares the CPU DAI (the AFE start) before the codec DAI
+	 * (hdmi-codec -> msm_dp_audio_prepare, which enables the engine); downstream 4.9 prepared
+	 * the codec first. The link prepare runs before both: start the engine here. Preparing
+	 * hdmi-codec again afterwards only rewrites the same registers.
+	 */
+	if (cpu_dai->id == DISPLAY_PORT_RX) {
+		struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(rtd, 0);
+
+		if (codec_dai->driver->ops && codec_dai->driver->ops->prepare) {
+			int ret = codec_dai->driver->ops->prepare(substream, codec_dai);
+
+			if (ret)
+				return ret;
+		}
+	}
+
 	return qcom_snd_sdw_prepare(substream, &data->stream_prepared[cpu_dai->id]);
 }
 
@@ -299,6 +318,15 @@ static int sm8250_snd_hw_free(struct snd_pcm_substream *substream)
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct sm8250_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+
+	/*
+	 * gts4lv: the same in reverse. Shutdown runs the codec DAI (DP audio engine off) before the
+	 * CPU DAI, and AFE_PORT_CMD_DEVICE_STOP then times out. hw_free comes before either: stop the
+	 * AFE port while the engine still runs. q6afe's own shutdown is then a no-op, and a prepare
+	 * after this starts the port again.
+	 */
+	if (cpu_dai->id == DISPLAY_PORT_RX && cpu_dai->driver->ops && cpu_dai->driver->ops->shutdown)
+		cpu_dai->driver->ops->shutdown(substream, cpu_dai);
 
 	return qcom_snd_sdw_hw_free(substream, &data->stream_prepared[cpu_dai->id]);
 }
