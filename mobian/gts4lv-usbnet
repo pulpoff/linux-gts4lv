@@ -1,0 +1,49 @@
+#!/bin/sh
+# gts4lv-usbnet: the USB network to the dev box, 172.16.42.1 on usb0. The initramfs's gadget stays
+# bound into the system. Images before 2026-11-08 built it with random MACs, so the dev box saw a new
+# enx* interface after every boot; here the NCM and RNDIS functions get fixed, locally administered
+# ones (the S10e's scheme with e5 for the S5e: the dev box sees enx025e10e50002 / enx025e10e50004,
+# and the tablet's NCM end is fe80::5e:10ff:fee5:1).
+# The host side's MAC (host_addr) only changes while its function is out of the config, so the gadget
+# is unbound, the functions unlinked, readdressed and linked again in the same order: the link drops
+# for a second. The tablet's own MAC (dev_addr) only reaches a netdev at its first registration, which
+# the initramfs did, so the netdev gets it with ip link.
+G=/sys/kernel/config/usb_gadget/g1
+FUNCS="ncm.usb0 rndis.usb0 acm.usb0"
+
+mac() {
+	case $1 in
+	ncm.*)   [ $2 = dev ] && echo 02:5e:10:e5:00:01 || echo 02:5e:10:e5:00:02 ;;
+	rndis.*) [ $2 = dev ] && echo 02:5e:10:e5:00:03 || echo 02:5e:10:e5:00:04 ;;
+	esac
+}
+
+host_fixed() {
+	for f in ncm.usb0 rndis.usb0; do
+		[ "$(tr -d '\0' < $G/functions/$f/host_addr 2>/dev/null)" = "$(mac $f host)" ] || return 1
+	done
+}
+
+if [ -d $G ] && ! host_fixed; then
+	UDC=$(cat $G/UDC)
+	[ -n "$UDC" ] && echo "" > $G/UDC
+	for f in $FUNCS; do rm -f $G/configs/c.1/$f; done
+	for f in ncm.usb0 rndis.usb0; do
+		[ -d $G/functions/$f ] || continue
+		mac $f dev > $G/functions/$f/dev_addr
+		mac $f host > $G/functions/$f/host_addr
+	done
+	for f in $FUNCS; do [ -d $G/functions/$f ] && ln -s $G/functions/$f $G/configs/c.1/; done
+	[ -n "$UDC" ] && echo "$UDC" > $G/UDC
+	echo "gadget host side: $(mac ncm.usb0 host) (NCM), $(mac rndis.usb0 host) (RNDIS)"
+fi
+for f in ncm.usb0 rndis.usb0; do
+	n=$(tr -d '\0' < $G/functions/$f/ifname 2>/dev/null)
+	[ -n "$n" ] && [ -e /sys/class/net/$n ] || continue
+	if [ "$(cat /sys/class/net/$n/address)" != "$(mac $f dev)" ]; then
+		ip link set $n down
+		ip link set $n address "$(mac $f dev)" && echo "$n ($f): $(mac $f dev)"
+	fi
+done
+for n in usb0 usb1; do ip link set $n up; done
+ip addr replace 172.16.42.1/24 dev usb0

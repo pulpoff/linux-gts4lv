@@ -22,6 +22,12 @@
  * Gesture event: b0 = eid[1:0] (2) stype[5:2] sf[7:6]; double tap is sf 1 /
  * stype 1, or gesture id (b1) 1.
  *
+ * Rotation: SIGRTMIN+n (n = 0..3, mutter's transform) turns every touch by n
+ * quarter turns counter-clockwise, with mutter's own matrices. Mutter rotates
+ * the touch for the panel's rotation only while it maps the touch to the panel;
+ * mapped to the TV (docked) it does not, and touch came out upside down there.
+ * gts4lv-powerkey sends the panel's transform then, 0 otherwise.
+ *
  * usage: gts4lv-touchd [/dev/i2c-N] (default: the bus at a84000)
  * GTS4LV_TOUCH_SWAP=1/0, _INVX=1, _INVY=1 adjust the axes to the panel.
  */
@@ -51,6 +57,8 @@
 
 static int i2c, ui, gpio, wake_ui;
 static volatile sig_atomic_t want_lpm, lpm;	/* 0 sensing, 1 double tap only, 2 off */
+static volatile sig_atomic_t want_rot;
+static int rot;		/* quarter turns, counter-clockwise */
 static int swap = 1, invx, invy = 1, debug;	/* verified on the panel 2026-10-27 */
 static int lastx[SLOTS], lasty[SLOTS];
 
@@ -199,7 +207,34 @@ static void chip_init(void)
 
 static void on_signal(int sig)
 {
-	want_lpm = sig == SIGHUP ? 2 : sig == SIGUSR1;
+	if (sig >= SIGRTMIN && sig <= SIGRTMIN + 3)
+		want_rot = sig - SIGRTMIN;
+	else
+		want_lpm = sig == SIGHUP ? 2 : sig == SIGUSR1;
+}
+
+/* mutter's transform_matrices (meta-monitor-manager.c) on the device's own
+ * range: 90 is x' = 1 - y, y' = x in 0..1, 180 x' = 1 - x, y' = 1 - y, 270
+ * x' = y, y' = 1 - x */
+static void rotate(int *x, int *y)
+{
+	int w = (swap ? RAW_Y : RAW_X) - 1, h = (swap ? RAW_X : RAW_Y) - 1;
+	int ox = *x, oy = *y;
+
+	switch (rot) {
+	case 1:
+		*x = w - oy * w / h;
+		*y = ox * h / w;
+		break;
+	case 2:
+		*x = w - ox;
+		*y = h - oy;
+		break;
+	case 3:
+		*x = oy * w / h;
+		*y = h - ox * h / w;
+		break;
+	}
 }
 
 static void set_opmode(int on);
@@ -273,6 +308,7 @@ static void handle(unsigned char *ev, int *active)
 		x = (swap ? RAW_Y : RAW_X) - 1 - x;
 	if (invy)
 		y = (swap ? RAW_X : RAW_Y) - 1 - y;
+	rotate(&x, &y);
 
 	emit(EV_ABS, ABS_MT_SLOT, tid);
 	if (st == 3) {
@@ -293,6 +329,20 @@ static void handle(unsigned char *ev, int *active)
 	lasty[tid] = y;
 	emit(EV_ABS, ABS_MT_TOUCH_MAJOR, ev[4]);
 	emit(EV_ABS, ABS_MT_TOUCH_MINOR, ev[5]);
+}
+
+static void lift_all(int *active)
+{
+	int i;
+
+	for (i = 0; i < SLOTS; i++)
+		if (*active & 1 << i) {
+			emit(EV_ABS, ABS_MT_SLOT, i);
+			emit(EV_ABS, ABS_MT_TRACKING_ID, -1);
+		}
+	*active = 0;
+	emit(EV_KEY, BTN_TOUCH, 0);
+	emit(EV_SYN, SYN_REPORT, 0);
 }
 
 static void drain(int *active)
@@ -335,6 +385,17 @@ int main(int argc, char **argv)
 	if ((s = getenv("GTS4LV_TOUCH_INVY")))
 		invy = atoi(s);
 	debug = (s = getenv("GTS4LV_TOUCH_DEBUG")) && atoi(s);
+	{
+		/* First: an RT signal kills a process that has no handler for it. */
+		struct sigaction sa = { .sa_handler = on_signal };	/* no SA_RESTART: poll wakes */
+		int i;
+
+		sigaction(SIGUSR1, &sa, NULL);
+		sigaction(SIGUSR2, &sa, NULL);
+		sigaction(SIGHUP, &sa, NULL);
+		for (i = 0; i < 4; i++)
+			sigaction(SIGRTMIN + i, &sa, NULL);
+	}
 
 	if (argc > 1)
 		snprintf(bus, sizeof(bus), "%s", argv[1]);
@@ -391,32 +452,20 @@ int main(int argc, char **argv)
 			return 1;
 		}
 	}
-	{
-		struct sigaction sa = { .sa_handler = on_signal };	/* no SA_RESTART: poll wakes */
-
-		sigaction(SIGUSR1, &sa, NULL);
-		sigaction(SIGUSR2, &sa, NULL);
-		sigaction(SIGHUP, &sa, NULL);
-	}
-
 	for (;;) {
 		struct pollfd p = { .fd = gpio, .events = POLLIN };
 		struct gpio_v2_line_event le;
 
 		if (want_lpm != lpm) {
-			if (want_lpm && active) {	/* lift every contact first */
-				int i;
-
-				for (i = 0; i < SLOTS; i++)
-					if (active & 1 << i) {
-						emit(EV_ABS, ABS_MT_SLOT, i);
-						emit(EV_ABS, ABS_MT_TRACKING_ID, -1);
-					}
-				active = 0;
-				emit(EV_KEY, BTN_TOUCH, 0);
-				emit(EV_SYN, SYN_REPORT, 0);
-			}
+			if (want_lpm && active)		/* lift every contact first */
+				lift_all(&active);
 			set_lpm(want_lpm);
+		}
+		if (want_rot != rot) {
+			if (active)	/* a contact must not jump across the screen */
+				lift_all(&active);
+			rot = want_rot;
+			fprintf(stderr, "rotation %d\n", rot * 90);
 		}
 
 		if (poll(&p, 1, irq_low() ? 0 : 1000) > 0 &&

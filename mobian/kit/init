@@ -37,7 +37,16 @@ gadget() {
 	echo "NCM+RNDIS+ACM" > configs/c.1/strings/0x409/configuration
 	echo 500 > configs/c.1/MaxPower
 	for f in ncm.usb0 rndis.usb0 acm.usb0; do
-		mkdir -p functions/$f && ln -s functions/$f configs/c.1/ 2>/dev/null
+		mkdir -p functions/$f || continue
+		# fixed MACs (locally administered, the S10e's scheme with e5): the dev box sees the
+		# same enx025e10e50002 every boot instead of a new random enx* name
+		case $f in
+		ncm.*)   echo 02:5e:10:e5:00:01 > functions/$f/dev_addr
+			 echo 02:5e:10:e5:00:02 > functions/$f/host_addr ;;
+		rndis.*) echo 02:5e:10:e5:00:03 > functions/$f/dev_addr
+			 echo 02:5e:10:e5:00:04 > functions/$f/host_addr ;;
+		esac
+		ln -s functions/$f configs/c.1/ 2>/dev/null
 	done
 	cd /
 }

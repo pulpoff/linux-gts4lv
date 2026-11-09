@@ -4,7 +4,8 @@
 # include/linux/ccic/s2mm005.h) and, when it reports an attached device with
 # the tablet as DFP (an OTG adapter or hub), switches the dwc3 role to host
 # and turns the SM5705 boost on for VBUS (gts4lv-usb-mode). Back to device
-# when it is unplugged.
+# when it is unplugged. DFP but sink (a dock with a charger on it: it powers
+# us, we are its USB host) is host without the boost, and charges.
 #
 # The controller enters host, but does not keep it: with a hub on the port it
 # reports attached for a second or two, then detached, then attached again,
@@ -13,11 +14,75 @@
 # So once in host, stay while anything is on the bus (we power it, so that is
 # the real "plugged in"); leave after HOST_EMPTY_S without a device, allowing
 # HOST_SETTLE_S for the first one to enumerate.
-import fcntl, glob, os, subprocess, time
+# Why it does not keep it: as source, Type-C wants VBUS within ~275 ms of the attach, and a 1 s poll plus a
+# shell script were far later; the firmware went 14 (SRC_Wait_New_Capabilities) -> 29 (ErrorRecovery) -> 0.
+# Stock reacts to the chip's interrupt (TLMM gpio38, falling edge, idle high), but here that line reads low
+# even with the pad's pull-up and never moves through a dozen VDM events (2026-11-08): its pull-up rail is
+# presumably off. So while nothing is attached, and while we boost, it polls every FAST_S (one read is 0.8 ms
+# of bit-banged I2C) and switches VBUS itself, before the script does the role.
+#
+# It also sets the charge rate, as stock does (sec_battery + sm5705_charger with
+# the battery DT's cable-info). The S2MM005 firmware negotiates PD by itself,
+# but nothing raised the SM5705's input limit from its 500 mA reset value, so a
+# 30 W charger with a 5 V/3 A contract charged at 500 mA (2026-11-08).
+# The firmware also asks for the first PDO (5 V) only: stock's sec_battery
+# picks another with s2mm005_select_pdo. A dock whose 5 V offer is 100 mA
+# (9 V 1.78 A beside it) charged at nothing until we did the same.
+#
+# And DisplayPort alt mode, for HDMI docks: see DisplayPort below.
+import ctypes, fcntl, glob, os, struct, subprocess, time
 
 I2C_SLAVE_FORCE, I2C_RDWR = 0x0706, 0x0707
 ADDR = 0x33
 HOST_SETTLE_S, HOST_EMPTY_S = 5, 2
+FAST_S, SLOW_S, STEP_S = 0.1, 1, 1	# poll: nothing attached or boosting / otherwise; charge step
+
+# SM5705 charger: input limit VBUSCNTL[6:0] = (mA - 100) / 25, fast charge CHGCNTL2[5:0] = (mA - 100) / 50,
+# CNTL[2:0] operation mode (4 charge off, 5 charge on), STATUS1 bit 0 VBUS present, STATUS2 bit 0 AICL active.
+CHG_ADDR, CNTL, VBUSCNTL, CHGCNTL2, STATUS1, STATUS2 = 0x49, 0x0c, 0x0d, 0x10, 0x08, 0x09
+# and the OTG boost, as gts4lv-usb-mode sets it: CHGCNTL6[3:2] current (3 = 1.5 A), FLEDCNTL6[3:0] voltage
+# (0xb 5.1 V, 0x5 4.5 V), CNTL mode 7
+CHGCNTL6, FLEDCNTL6 = 0x14, 0x20
+BASE_MA = 500		# the reset value, and stock's plain-USB 475/500
+MAX_MA = 3000		# stock's max_input_current and max_charging_current
+HV_IN_MA = 1650		# stock's 9 V cables (cable-info current_group_4): input 1650, charge MAX_MA
+PD_MAX_MW = 15000	# stock's pd_charging_charge_power; max_input_voltage is 9 V
+PDO_ASKS, PDO_GONE_S = 3, 10	# PDO selects per cable, the cable counting as gone after this long
+# Temperatures. Stock's sec_battery reads the battery NTC on PM660 ADC channel 0x51 and the charger's on 0x4e
+# (its log: battery ADC 8104 = 25.6 C, charger 7028 = 31.2 C, against our 25.4 and 31.8). Our DT has qcom's
+# generic labels for them. sm5705-battery's own temp is the SM5705 die (charger and gauge are one chip): it
+# reads 10-15 C over the battery within seconds of charging at 9 V, so it is only the fallback without the ADC.
+BATT_THERM, CHG_THERM = "quiet_therm", "emmc_therm"
+FG_TEMP = "/sys/class/power_supply/sm5705-battery/temp"	# 0.1 C
+CHG_HOT_C, CHG_HOT_OK_C, CHG_HOT_IN_MA, CHG_HOT_MA = 80, 77, 1000, 1500	# stock's chg_high_temp and its limits
+# gts4lv-powerkey drops the rate to BASE_MA before a system sleep (a cable swapped while it sleeps must not
+# find 3 A set) and holds it there with this file until the sleep is over. Older than HOLD_S it is stale (the
+# sleep began seconds after it was made): after the wake the rate goes back up even if nobody removed it.
+HOLD, HOLD_S = "/run/gts4lv-charge-hold", 30
+# DisplayPort: the kernel half (gts4lv-dp-altmode, in the DT from 2026-11-08), the S2MM005's VDM IRQ status
+# and RX buffers (32 bytes: PD header, VDM header, VDOs), and the plug orientation: TLMM 25, which the S2MM005
+# drives (stock's redriver reads it as combo,con_sel: low = CC1). Low is REVERSE for the redriver and the PHY.
+DP_NODE = "/sys/bus/platform/drivers/gts4lv-dp-altmode/*/"
+VDM_IRQ, RX_MODES, RX_ATTENTION, RX_STATUS, RX_CONFIGURE = 0x44, 0x560, 0x5c0, 0x600, 0x620
+VDM_MODES, VDM_EXIT, VDM_ATTENTION, VDM_STATUS, VDM_CONFIGURE = 3, 5, 6, 16, 17
+PIN_C, PIN_D, PIN_E = 0x04, 0x08, 0x10
+ORIENT_CHIP, ORIENT_LINE = "3400000.pinctrl", 25
+
+
+class Msg(ctypes.Structure):
+    _fields_ = [("addr", ctypes.c_uint16), ("flags", ctypes.c_uint16), ("len", ctypes.c_uint16),
+                ("buf", ctypes.c_void_p)]
+
+
+class RdWr(ctypes.Structure):
+    _fields_ = [("msgs", ctypes.POINTER(Msg)), ("nmsgs", ctypes.c_uint32)]
+
+
+def adc_input(label):
+    for f in glob.glob("/sys/bus/iio/devices/iio:device*/in_temp_*_label"):
+        if open(f).read().strip() == label:
+            return f[:-len("label")] + "input"
+    return None
 
 
 def bus_of(name):
@@ -27,14 +92,64 @@ def bus_of(name):
     raise SystemExit(f"no {name} bus")
 
 
+def xfer(fd, addr, reg, n):
+    """Register address, then a repeated-start read of n bytes: one transfer, so no other user of the
+    bus can move the chip's address pointer in between."""
+    a = ctypes.create_string_buffer(reg, len(reg))
+    b = ctypes.create_string_buffer(n)
+    m = (Msg * 2)(Msg(addr, 0, len(reg), ctypes.cast(a, ctypes.c_void_p)),
+                  Msg(addr, 1, n, ctypes.cast(b, ctypes.c_void_p)))
+    fcntl.ioctl(fd, I2C_RDWR, RdWr(m, 2))
+    return b.raw
+
+
 fd = os.open(bus_of("i2c-usbpd"), os.O_RDWR)
-fcntl.ioctl(fd, I2C_SLAVE_FORCE, ADDR)
+chg = os.open(bus_of("i2c-charger"), os.O_RDWR)
+fcntl.ioctl(chg, I2C_SLAVE_FORCE, CHG_ADDR)
+
+
+def pd_read(reg, n):
+    return xfer(fd, ADDR, bytes((reg >> 8, reg & 0xff)), n)	# 16-bit register address
 
 
 def func_state():
-    os.write(fd, bytes((0x00, 0x20)))	# 16-bit register address, then read
-    b = os.read(fd, 4)
-    return {"attached": b[3] & 1, "source": (b[3] >> 1) & 1, "dfp": (b[3] >> 2) & 1}
+    v = struct.unpack("<I", pd_read(0x20, 4))[0]
+    return {"attached": v >> 24 & 1, "source": v >> 25 & 1, "dfp": v >> 26 & 1,
+            "pd_state": v & 0xff, "rp": v >> 27 & 3, "raw": v}
+
+
+def chg_get(reg):
+    return xfer(chg, CHG_ADDR, bytes((reg,)), 1)[0]
+
+
+def chg_set(reg, val):
+    os.write(chg, bytes((reg, val)))
+
+
+def chg_upd(reg, mask, val):
+    chg_set(reg, chg_get(reg) & ~mask & 0xff | val)
+
+
+def vbus_on():
+    """gts4lv-usb-mode host's boost, in-process, so VBUS is up within ms of seeing the device. Never into a
+    supply: STATUS1 bit 0 is VBUS present, which is our own only once in mode 7."""
+    if chg_get(CNTL) & 7 == 7:
+        return True
+    if chg_get(STATUS1) & 1:
+        return False
+    chg_upd(CHGCNTL6, 0x0c, 0x0c)
+    chg_upd(FLEDCNTL6, 0x0f, 0x0b)
+    chg_upd(CNTL, 0x07, 0x07)
+    return True
+
+
+def vbus_off():
+    """Out of the boost as gts4lv-usb-mode does it: suspend (VBUS off at once), then charge."""
+    if chg_get(CNTL) & 7 == 7:
+        chg_upd(CNTL, 0x07, 0x00)
+        time.sleep(0.1)
+        chg_upd(CNTL, 0x07, 0x05)
+        chg_upd(FLEDCNTL6, 0x0f, 0x05)
 
 
 def role():
@@ -50,32 +165,420 @@ def bus_has_device():
                for d in glob.glob("/sys/bus/usb/devices/*"))
 
 
-want_prev = None
+def pd_contract(s):
+    """In S2MM005 state 21 (PD sink ready): the request it sent (TX_REQUEST 0x240: header, then the RDO)
+    and the source's capabilities (RX_SRC_CAPA 0x260: header, then the PDOs), else None."""
+    if s["pd_state"] != 21:
+        return None
+    rdo = struct.unpack("<2I", pd_read(0x240, 8))[1]
+    caps = struct.unpack("<8I", pd_read(0x260, 32))
+    return rdo, caps[1:1 + (caps[0] >> 12 & 7)]
+
+
+def pdo_limits(pdo):
+    """(mV, input mA, charge mA) stock would use on a fixed PDO, or None for one it does not take."""
+    if pdo >> 30:					# not a fixed supply
+        return None
+    mv, ma = (pdo >> 10 & 0x3ff) * 50, (pdo & 0x3ff) * 10
+    if mv == 5000:
+        return mv, min(ma, MAX_MA), min(ma, MAX_MA)
+    if mv == 9000:
+        return mv, min(ma, HV_IN_MA), MAX_MA
+    return None
+
+
+def best_pdo(caps):
+    """Stock's choice: the PDO with the most power within 9 V and 15 W. Another by less than a watt is
+    not worth a renegotiation, so ties stay with the earlier (5 V) one."""
+    best, best_mw = None, 0
+    for pos, pdo in enumerate(caps, 1):
+        lim = pdo_limits(pdo)
+        mw = min(lim[0] * lim[1] // 1000, PD_MAX_MW) if lim else 0
+        if mw > best_mw + 1000 or best is None and mw:
+            best, best_mw = pos, mw
+    return best
+
+
+def pd_cmd(*cmd):
+    """A command to REG_I2C_SLV_CMD (0x0010): one write of the 16-bit address and the bytes."""
+    b = ctypes.create_string_buffer(bytes((0, 0x10) + cmd), 2 + len(cmd))
+    fcntl.ioctl(fd, I2C_RDWR, RdWr((Msg * 1)(Msg(ADDR, 0, 2 + len(cmd), ctypes.cast(b, ctypes.c_void_p))), 1))
+
+
+def select_pdo(pos):
+    """Stock's s2mm005_select_pdo: 03 03 pos, then 03 02 17 (State_PE_SNK_Wait_for_Capabilities)."""
+    pd_cmd(3, 3, pos)
+    pd_cmd(3, 2, 17)
+
+
+def source_limit(s, contract):
+    """(input mA, charge mA, why) for what the source offers: the PD contract, else the Type-C Rp current.
+    Stock's numbers: 9 V at most (input 1650, charge 3000), Rp 3 A 3000, Rp 1.5 A 1500, default USB 500."""
+    if contract:
+        rdo, caps = contract
+        pos, op_ma = rdo >> 28 & 7, (rdo >> 10 & 0x3ff) * 10
+        pdo = caps[pos - 1] if 1 <= pos <= len(caps) else 0
+        lim = pdo_limits(pdo)
+        if lim:
+            return min(op_ma, lim[1]), lim[2], f"PD {lim[0] // 1000} V {op_ma} mA"
+        return BASE_MA, BASE_MA, f"PD object {pos} 0x{pdo:08x} (not a stock supply)"
+    ma, why = {3: (3000, "Rp 3 A"), 2: (1500, "Rp 1.5 A")}.get(s["rp"], (BASE_MA, "default USB"))
+    return ma, ma, why
+
+
+class Charge:
+    """Input limit and charge current for what is on the port, with stock's battery temperature rules:
+    no charging from 50 C (again at 45) and below 0 C (again at 5), at most 1800 mA from 41 C (until
+    below 39), 1200 mA below 15 C; and its charger one, input 1000 and charge 1500 mA from 80 C. AICL (left on, as at reset) pulls the input down when the source sags;
+    while it is active the limit comes down 100 mA a second, as stock's aicl_work does, and stays down
+    until the cable goes."""
+
+    def __init__(self):
+        self.key = self.limit = self.charge = self.why = None
+        self.hot = self.cold = self.warm = self.aicl = self.chg_hot = False
+        self.batt_adc, self.chg_adc = adc_input(BATT_THERM), adc_input(CHG_THERM)
+        if not self.batt_adc:
+            print(f"charge: no {BATT_THERM} ADC channel, guarding on the SM5705 die temperature", flush=True)
+        self.applied = self.error = None
+        self.asks, self.gone_since = 0, None
+
+    def temp(self):
+        """Battery temperature in C: its NTC, else the SM5705 die (higher, so on the safe side)."""
+        for f, div in ((self.batt_adc, 1000), (FG_TEMP, 10)):
+            try:
+                return int(open(f).read()) / div
+            except (TypeError, OSError, ValueError):
+                pass
+        return None
+
+    def chg_temp(self):
+        try:
+            return int(open(self.chg_adc).read()) / 1000
+        except (TypeError, OSError, ValueError):
+            return None
+
+    def step(self, s):
+        try:
+            vbus = chg_get(STATUS1) & 1
+            try:
+                if time.time() - os.stat(HOLD).st_mtime < HOLD_S:
+                    return
+            except FileNotFoundError:
+                pass
+            if not (vbus and s["attached"] and not s["source"]):
+                self.key = None
+                self.gone_since = self.gone_since or time.monotonic()
+                if time.monotonic() - self.gone_since > PDO_GONE_S:
+                    self.asks = 0
+                self.apply(BASE_MA, BASE_MA, True, "no charger")
+                return
+            self.gone_since = None
+            contract = pd_contract(s)
+            # Renegotiating (Wait_for_Capabilities .. Transition_Sink) or answering a capabilities request:
+            # the old contract holds until a new one is in place, so its limits do too.
+            renegotiating = (contract is None and self.key is not None and self.key[1] is not None
+                             and s["pd_state"] in (17, 18, 19, 20, 24, 25))
+            if not renegotiating and self.key != (s["raw"], contract):	# a new attach or contract: read it once
+                self.key = (s["raw"], contract)
+                self.limit, self.charge, self.why = source_limit(s, contract)
+                self.aicl = False
+                self.pick(contract)
+            if chg_get(STATUS2) & 1 and self.limit > BASE_MA:
+                self.limit = max(BASE_MA, self.limit - 100)
+                self.aicl = True
+            t = self.temp()
+            if t is not None:
+                self.hot = t >= (45 if self.hot else 50)
+                self.cold = t < (5 if self.cold else 0)
+                self.warm = t >= (39 if self.warm else 41)
+            ct = self.chg_temp()
+            if ct is not None:
+                self.chg_hot = ct >= (CHG_HOT_OK_C if self.chg_hot else CHG_HOT_C)
+            inp, charge = self.limit, min(self.charge, MAX_MA)
+            if self.chg_hot:
+                inp, charge = min(inp, CHG_HOT_IN_MA), min(charge, CHG_HOT_MA)
+            if self.warm:
+                charge = min(charge, 1800)
+            if t is not None and t < 15:
+                charge = min(charge, 1200)
+            self.apply(inp, charge, not (self.hot or self.cold),
+                       "%s%s, battery %s C, charger %s C" % (self.why, ", AICL" if self.aicl else "",
+                                                            "?" if t is None else "%.1f" % t,
+                                                            "?" if ct is None else "%.1f" % ct))
+            self.error = None
+        except OSError as e:
+            if str(e) != self.error:
+                print("charge:", e, flush=True)
+                self.error = str(e)
+
+    def pick(self, contract):
+        """Ask for stock's PDO when the contract is another. The answer is a new contract, read on the next
+        step; a source that refuses, or resets the port on the request, gets asked PDO_ASKS times a cable."""
+        if not contract or self.asks >= PDO_ASKS:
+            return
+        rdo, caps = contract
+        best = best_pdo(caps)
+        if best and best != rdo >> 28 & 7:
+            self.asks += 1
+            print(f"charge: {self.why}, asking for PDO {best} ({pdo_limits(caps[best - 1])[0] // 1000} V)",
+                  flush=True)
+            select_pdo(best)
+
+    def apply(self, inp, charge, on, why):
+        want = ((inp - 100) // 25 & 0x7f, (charge - 100) // 50 & 0x3f, on)
+        cntl = chg_get(CNTL)
+        mode = cntl & 7
+        if mode not in (4, 5):			# OTG boost (7) or suspended by hand (0): not ours
+            return
+        have = (chg_get(VBUSCNTL) & 0x7f, chg_get(CHGCNTL2) & 0x3f, mode == 5)
+        if have == want:
+            self.applied = want
+            return
+        chg_set(VBUSCNTL, (chg_get(VBUSCNTL) & 0x80) | want[0])
+        chg_set(CHGCNTL2, (chg_get(CHGCNTL2) & 0xc0) | want[1])
+        if have[2] != on:
+            chg_set(CNTL, (cntl & ~7) | (5 if on else 4))
+        if want != self.applied:
+            print(f"charge: {why} -> input {inp} mA, charge {charge} mA, charging {'on' if on else 'OFF'}",
+                  flush=True)
+        self.applied = want
+
+
+class GpioIn:
+    """One TLMM line requested as an input (GPIO v2 chardev), read on demand."""
+
+    class ChipInfo(ctypes.Structure):
+        _fields_ = [("name", ctypes.c_char * 32), ("label", ctypes.c_char * 32), ("lines", ctypes.c_uint32)]
+
+    class Req(ctypes.Structure):
+        _fields_ = [("offsets", ctypes.c_uint32 * 64), ("consumer", ctypes.c_char * 32),
+                    ("flags", ctypes.c_uint64), ("num_attrs", ctypes.c_uint32), ("pad", ctypes.c_uint32 * 5),
+                    ("attrs", ctypes.c_uint8 * 240), ("num_lines", ctypes.c_uint32),
+                    ("event_buffer_size", ctypes.c_uint32), ("pad2", ctypes.c_uint32 * 5), ("fd", ctypes.c_int32)]
+
+    def __init__(self, label, line):
+        self.fd = None
+        for p in sorted(glob.glob("/dev/gpiochip*")):
+            chip = os.open(p, os.O_RDONLY)
+            try:
+                ci = self.ChipInfo()
+                fcntl.ioctl(chip, 0x8044b401, ci)			# GPIO_GET_CHIPINFO_IOCTL
+                if ci.label.decode() == label:
+                    r = self.Req(consumer=b"gts4lv-usb-otgd", flags=1 << 2, num_lines=1)	# INPUT
+                    r.offsets[0] = line
+                    fcntl.ioctl(chip, 0xc250b407, r)		# GPIO_V2_GET_LINE_IOCTL
+                    self.fd = r.fd
+                    return
+            finally:
+                os.close(chip)
+
+    def get(self):
+        v = (ctypes.c_uint64 * 2)(0, 1)				# bits, mask
+        fcntl.ioctl(self.fd, 0xc010b40e, v)			# GPIO_V2_LINE_GET_VALUES_IOCTL
+        return v[0] & 1
+
+
+class DisplayPort:
+    """DP alt mode for HDMI docks. Once enabled (03 31, which stock sends after every controller reset) the
+    S2MM005 firmware runs the DP VDMs itself whenever it is DFP with a PD contract, but leaves two steps to
+    the AP, as Samsung's ccic_alternate.c takes them: 03 32 after Discover Modes, so it goes on to Enter
+    Mode, and 03 30 <pin> (the DP Configure that switches the dock's lanes) after the first Status Update
+    or Attention with a port connected. Every VDM IRQ is cleared with 01, as stock does on every interrupt.
+    The kernel half is gts4lv-dp-altmode's sysfs: orientation, then mode, then hpd, which only exists in
+    these VDMs here (no HPD wire). The pin is stock's choice: D when the sink prefers multi-function (Status
+    bit 4), else C, E, D. Pin C first for those cost a USB-C hub's HDMI converter its signal (2026-11-08: a
+    2-lane Parade PS176 behind a USB 3 hub, configured for C, saw no clock recovery on any lane, at any
+    swing; the S10e drives the same hub with D). GTS4LV_DP_PIN=C|D|E forces one, for tests."""
+
+    def __init__(self):
+        self.enabled = False
+        self.orient = None
+        self.clear()
+
+    def clear(self):
+        self.pins = self.pin = self.status = 0
+        self.configured = self.active = False
+        self.hpd = None
+
+    def node(self):
+        n = glob.glob(DP_NODE + "mode")
+        return n[0][:-len("mode")] if n else None
+
+    def sysfs(self, attr, val):
+        with open(self.node() + attr, "w") as f:
+            f.write(val)
+
+    def busy(self):
+        """Mid-exchange: poll fast."""
+        return self.enabled and (self.pins or self.configured) and not self.active
+
+    def off(self, why):
+        if self.active:
+            print(f"DP: {why}: HPD low, lanes back to safe", flush=True)
+            for attr, val in (("hpd", "0"), ("mode", "safe"), ("orientation", "none")):
+                try:
+                    self.sysfs(attr, val)
+                except (OSError, TypeError) as e:
+                    print(f"DP: {attr} {val}: {e}", flush=True)
+        self.clear()
+
+    def vdo(self, reg):
+        w = struct.unpack("<8I", pd_read(reg, 32))
+        return w[1], (w[2] if w[0] >> 12 & 7 > 1 else None)	# VDM header, first VDO
+
+    def set_hpd(self, status, irq=False):
+        hpd = status >> 7 & 1
+        if hpd != self.hpd or irq and hpd:
+            print(f"DP: HPD {'high' if hpd else 'low'}{' (IRQ_HPD)' if irq and hpd else ''}", flush=True)
+            self.sysfs("hpd", "irq" if irq and hpd else str(hpd))
+            self.hpd = hpd
+
+    def step(self, s):
+        if not self.node():
+            return
+        if not self.enabled or s["raw"] >> 31:		# FUNC_STATE RESET: the controller restarted
+            pd_cmd(0x01)
+            pd_cmd(0x03, 0x31)
+            self.enabled = True
+            print("DP: alt mode enabled on the S2MM005", flush=True)
+        if not (s["attached"] and s["dfp"]):
+            self.off("unplugged")
+            return
+        vdm = struct.unpack("<I", pd_read(VDM_IRQ, 4))[0]
+        if not vdm:
+            return
+        pd_cmd(0x01)
+        if vdm >> VDM_MODES & 1:
+            hdr, mode = self.vdo(RX_MODES)
+            if hdr >> 16 == 0xff01 and mode is not None:
+                # Stock's choice of field: a UFP_D receptacle or a DFP_D plug lists its pins in 23:16, a
+                # DFP_D receptacle or a UFP_D plug in 15:8; one that is both, by receptacle or plug
+                cap, receptacle = mode & 3, mode >> 6 & 1
+                ufp_field = receptacle if cap == 3 else (cap == 1) == bool(receptacle)
+                self.pins = mode >> 16 & 0xff if ufp_field else mode >> 8 & 0xff
+                print(f"DP: sink mode VDO 0x{mode:08x}, pins 0x{self.pins:02x}", flush=True)
+                pd_cmd(0x03, 0x32)
+        if vdm >> VDM_EXIT & 1:
+            self.off("Exit Mode")
+        for bit, reg in ((VDM_STATUS, RX_STATUS), (VDM_ATTENTION, RX_ATTENTION)):
+            if not vdm >> bit & 1:
+                continue
+            hdr, status = self.vdo(reg)
+            if status is None:
+                continue
+            if not status & 3:
+                if self.active:
+                    self.set_hpd(0)
+                continue
+            self.status = status
+            if not self.configured and self.pins:
+                order = (PIN_D, PIN_C, PIN_E) if status >> 4 & 1 else (PIN_C, PIN_E, PIN_D)
+                force = {"C": PIN_C, "D": PIN_D, "E": PIN_E}.get(os.environ.get("GTS4LV_DP_PIN", ""))
+                if force:
+                    order = (force,)
+                self.pin = next((p for p in order if self.pins & p), 0)
+                if self.pin:
+                    print(f"DP: status 0x{status:08x}, configuring pin {'CDE'[(PIN_C, PIN_D, PIN_E).index(self.pin)]}",
+                          flush=True)
+                    pd_cmd(0x03, 0x30, self.pin)
+                    self.configured = True
+            elif self.active:
+                self.set_hpd(status, irq=bool(status >> 8 & 1))
+        if self.configured and not self.active and vdm >> VDM_CONFIGURE & 1:
+            hdr, _ = self.vdo(RX_CONFIGURE)
+            if hdr >> 6 & 3 != 1:
+                print(f"DP: Configure not ACKed (VDM header 0x{hdr:08x})", flush=True)
+                self.configured = False
+                return
+            if self.orient is None:
+                self.orient = GpioIn(ORIENT_CHIP, ORIENT_LINE)
+            # High is what the PTN36502 and the QMP PHY call normal. Read the other way round (2026-11-08),
+            # one lane of a 2-lane dock got the redriver's USB path: clock recovery, never a symbol lock.
+            orientation = "normal" if self.orient.get() else "reverse"
+            print(f"DP: Configure ACK, plug {orientation}, lanes to DP", flush=True)
+            self.sysfs("orientation", orientation)
+            self.sysfs("mode", {PIN_C: "dp-c", PIN_D: "dp-d", PIN_E: "dp-e"}[self.pin])
+            self.active = True
+            self.set_hpd(self.status)
+
+
+def mode():
+    """device, host (we power the port: SM5705 OTG boost, mode 7) or dock (host on the other side's VBUS)."""
+    r = role()
+    if r != "host":
+        return r
+    return "host" if chg_get(CNTL) & 7 == 7 else "dock"
+
+
+charge = Charge()
+dp = DisplayPort()
+dp_error = None
+want_prev = refused = last_raw = None
+last_step = 0
 # Started (or restarted) with the port already in host: keep that session.
 host_since = time.monotonic() if role() == "host" else None
 empty_since = None
 while True:
     try:
         s = func_state()
+        cur = mode()
     except OSError:
         time.sleep(2)
         continue
     now = time.monotonic()
-    want = "host" if s["attached"] and s["dfp"] else "device"
-    if role() == "host" and host_since is not None and want == "device":
+    want = ("host" if s["source"] else "dock") if s["attached"] and s["dfp"] else "device"
+    if cur in ("host", "dock") and host_since is not None and want == "device":
         if bus_has_device():
             empty_since = None
-            want = "host"
+            want = cur
         else:
             empty_since = empty_since or now
             if now - host_since < HOST_SETTLE_S or now - empty_since < HOST_EMPTY_S:
-                want = "host"
+                want = cur
     if want != want_prev:
-        print(f"S2MM005 {s} bus {'busy' if bus_has_device() else 'empty'} -> {want}", flush=True)
+        print(f"S2MM005 {dict((k, s[k]) for k in ('attached', 'source', 'dfp'))} "
+              f"bus {'busy' if bus_has_device() else 'empty'} -> {want}", flush=True)
         want_prev = want
-    if role() and role() != want:
-        if subprocess.run(["gts4lv-usb-mode", want]).returncode == 0 and want == "host":
-            host_since, empty_since = now, None
-    if want == "device":
+    if cur and cur != want:
+        # VBUS first, here; then the script for the role. A boost is refused while something else powers
+        # the port, which can last: say so once.
+        try:
+            if want == "host" and not vbus_on():
+                r = subprocess.CompletedProcess([], 1, "", "VBUS is present (charger or PC connected): not boosting")
+            else:
+                if cur == "host":
+                    vbus_off()
+                r = subprocess.run(["gts4lv-usb-mode", want], capture_output=True, text=True)
+        except OSError as e:
+            r = subprocess.CompletedProcess([], 1, "", f"charger: {e}")
+        out = (r.stdout + r.stderr).strip()
+        if out and out != refused:
+            print(f"gts4lv-usb-mode {want}: {out}", flush=True)
+        refused = out if r.returncode else None
+        if r.returncode == 0:
+            # dwc3 changes role in a work item and reports the one in force: read back too soon (the fast
+            # poll did, 0.1 s on) it still says device, and that looked like an unplug (2026-11-08)
+            until = time.monotonic() + 2
+            while role() != ("device" if want == "device" else "host") and time.monotonic() < until:
+                time.sleep(0.05)
+            if want == "device":
+                host_since = empty_since = None
+            elif cur == "device":
+                host_since, empty_since = now, None
+            cur = want
+    if cur == "device":
         host_since = empty_since = None
-    time.sleep(1)
+    if cur != "host" and (s["raw"] != last_raw or now - last_step >= STEP_S):
+        charge.step(s)
+        last_step = now
+    last_raw = s["raw"]
+    try:
+        dp.step(s)
+        dp_error = None
+    except (OSError, TypeError) as e:			# TypeError: the kernel node went away mid-step
+        if str(e) != dp_error:
+            print("DP:", e, flush=True)
+            dp_error = str(e)
+    # Fast where it counts: an attach needs VBUS at once, and while we boost a dock that gets its charger
+    # takes over VBUS (PR_Swap, source drops), so ours must go. The DP exchange waits on us at two steps.
+    time.sleep(FAST_S if not s["attached"] or cur == "host" or dp.busy() else SLOW_S)

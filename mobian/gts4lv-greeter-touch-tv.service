@@ -1,0 +1,15 @@
+[Unit]
+Description=Login screen: the panel's touch drives the TV when docked
+# Mutter maps a touchscreen to a monitor only from the user's own dconf db (g_settings_get_user_value,
+# meta-input-mapper.c): a value in /etc/dconf/db/gdm.d is only a default to it, and touch stayed on the
+# panel (2026-11-08). So it goes into the greeter's own db, on every greeter start: it survives restarts
+# there (/var/lib/gdm3/seat0/config), but not a fresh image. Undocked, mutter finds no such monitor and
+# maps the touch to the panel; gts4lv-powerkey turns it with the tablet while it is on the TV.
+PartOf=gnome-session@gnome-login.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/gsettings set org.gnome.desktop.peripherals.touchscreen:/org/gnome/desktop/peripherals/touchscreens/0483:1ba9/ output "['GSM', 'LG TV SSCR2', '0x01010101']"
+
+[Install]
+WantedBy=gnome-session@gnome-login.target

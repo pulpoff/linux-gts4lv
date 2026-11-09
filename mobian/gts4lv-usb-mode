@@ -1,6 +1,8 @@
 #!/bin/sh
 # USB port role, until the S2MM005 Type-C controller has a driver:
 #   gts4lv-usb-mode host     OTG: USB host, and the SM5705 boosts VBUS to 5.1 V
+#   gts4lv-usb-mode dock     USB host on a port the other side powers (a dock with a charger
+#                            on it): no boost, the SM5705 keeps charging from its VBUS
 #   gts4lv-usb-mode device   back to the gadget (USB networking, charging)
 #   gts4lv-usb-mode          print the current role and charger mode
 # SM5705 (i2c-charger, 0x49), from Samsung's sm5705_charger_oper.c:
@@ -16,8 +18,9 @@ upd() { v=$(( ($(rd $1) & ~$2) | $3 )); i2cset -f -y $BUS 0x49 $1 $v; }
 case "$1" in
 host)
 	# Never boost into a supply: STATUS1 0x08 bit 0 is VBUS present (a
-	# charger or PC on the port). An OTG adapter has no VBUS of its own.
-	if [ "$(cat $ROLE)" != host ] && [ $(( $(rd 0x08) & 1 )) = 1 ]; then
+	# charger, PC or powered dock on the port). An OTG adapter has no VBUS
+	# of its own. Once boosting (mode 7) the bit is our own VBUS.
+	if [ $(( $(rd 0x0c) & 7 )) != 7 ] && [ $(( $(rd 0x08) & 1 )) = 1 ]; then
 		echo "VBUS is present (charger or PC connected): not switching to host" >&2
 		exit 1
 	fi
@@ -25,6 +28,15 @@ host)
 	upd 0x20 0x0f 0x0b	# boost 5.1 V
 	upd 0x0c 0x07 0x07	# USB OTG mode: VBUS on
 	sleep 0.1
+	echo host > $ROLE
+	;;
+dock)
+	if [ $(( $(rd 0x0c) & 7 )) = 7 ]; then	# boosting: stop, then charge as for device
+		upd 0x0c 0x07 0x00
+		sleep 0.1
+		upd 0x0c 0x07 0x05
+		upd 0x20 0x0f 0x05
+	fi
 	echo host > $ROLE
 	;;
 device)
@@ -38,6 +50,6 @@ device)
 	echo "role $(cat $ROLE), charger mode $(( $(rd 0x0c) & 7 )) (5 charge, 7 otg)"
 	;;
 *)
-	echo "usage: $0 [host|device]" >&2; exit 2
+	echo "usage: $0 [host|dock|device]" >&2; exit 2
 	;;
 esac

@@ -1,0 +1,1 @@
+obj-m += gts4lv_dp_altmode.o

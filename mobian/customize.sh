@@ -25,9 +25,10 @@ chmod 700 $R/root/.ssh $R/home/mobian/.ssh
 chmod 600 $R/root/.ssh/authorized_keys $R/home/mobian/.ssh/authorized_keys
 ch chown -R mobian:mobian /home/mobian/.ssh
 
-# --- USB network: the initramfs's gadget stays bound; give usb0 its address ---
+# --- USB network: the initramfs's gadget stays bound; fixed MACs, and usb0 its address ---
 mkdir -p $R/etc/NetworkManager/conf.d $R/etc/NetworkManager/system-connections $R/etc/modules-load.d
 printf '[keyfile]\nunmanaged-devices=interface-name:usb*\n' > $R/etc/NetworkManager/conf.d/gts4lv-usb.conf
+install -m 755 /home/pulp/gts4lv/mobian/gts4lv-usbnet $R/usr/local/sbin/gts4lv-usbnet
 cat > $R/etc/systemd/system/gts4lv-usbnet.service <<'EOF'
 [Unit]
 Description=USB network to the dev box (172.16.42.1 on usb0)
@@ -35,10 +36,21 @@ Before=network.target ssh.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -c 'for n in usb0 usb1; do ip link set $n up; done; ip addr replace 172.16.42.1/24 dev usb0'
+ExecStart=/usr/local/sbin/gts4lv-usbnet
 [Install]
 WantedBy=multi-user.target
 EOF
+
+# --- USB-C port: OTG/dock host role, VBUS, charge rate and PDO choice, until the S2MM005 has a driver ---
+install -m 755 /home/pulp/gts4lv/mobian/gts4lv-usb-otgd $R/usr/local/sbin/gts4lv-usb-otgd
+install -m 755 /home/pulp/gts4lv/mobian/gts4lv-usb-mode $R/usr/local/sbin/gts4lv-usb-mode
+install -m 644 /home/pulp/gts4lv/mobian/gts4lv-usb-otgd.service $R/etc/systemd/system/gts4lv-usb-otgd.service
+# Docked on the LG TV (Parade PS176 hub): 24 bpp (no picture at 30), the login on the TV (mutter falls back
+# to /etc/xdg/monitors.xml when the greeter's own has no layout for TV + panel), the panel's touch on the TV.
+install -D -m 644 /home/pulp/gts4lv/mobian/gts4lv-dp.conf $R/etc/modprobe.d/gts4lv-dp.conf
+install -D -m 644 /home/pulp/gts4lv/mobian/monitors-tv.xml $R/etc/xdg/monitors.xml
+install -m 644 /home/pulp/gts4lv/mobian/gts4lv-greeter-touch-tv.service $R/etc/systemd/user/gts4lv-greeter-touch-tv.service
+ch systemctl --global enable gts4lv-greeter-touch-tv.service >/dev/null
 
 # --- tell the next initramfs this boot made it (it reads pstore) ---
 cat > $R/etc/systemd/system/gts4lv-boot-ok.service <<'EOF'
@@ -93,7 +105,7 @@ for d in local gdm; do
 done
 ch dconf update || echo "W: dconf update failed"
 
-ch systemctl enable gts4lv-usbnet.service gts4lv-boot-ok.service gts4lv-modem.service gts4lv-audio.service ssh.service gdm.service >/dev/null
+ch systemctl enable gts4lv-usbnet.service gts4lv-usb-otgd.service gts4lv-boot-ok.service gts4lv-modem.service gts4lv-audio.service ssh.service gdm.service >/dev/null
 ch systemctl set-default graphical.target >/dev/null
 # Root console on the USB gadget's ACM port (the host's /dev/ttyACM*): the way
 # in when sshd does not come up. Same access the initramfs gives over the cable.
@@ -121,6 +133,7 @@ WantedBy=multi-user.target
 EOT
 ch systemctl enable gts4lv-touchd.service >/dev/null
 install -m 755 /home/pulp/gts4lv/mobian/gts4lv-powerkey $R/usr/local/sbin/gts4lv-powerkey
+install -m 755 /home/pulp/gts4lv/mobian/gts4lv-panel $R/usr/local/sbin/gts4lv-panel	# docked: the power key switches only the panel
 install -m 644 /home/pulp/gts4lv/mobian/gts4lv-powerkey.service $R/etc/systemd/system/gts4lv-powerkey.service
 ch systemctl enable gts4lv-powerkey.service >/dev/null
 # Wi-Fi keeps the tablet's own MAC (from EFS), so its address and DHCP lease stay put.

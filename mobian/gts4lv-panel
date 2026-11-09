@@ -1,0 +1,78 @@
+#!/usr/bin/python3
+# gts4lv-panel off|on: the built-in panel out of mutter's layout and back, every other monitor as it is.
+# gts4lv-powerkey runs it in the session (the user's bus) when docked: the power key then switches only
+# the panel and the TV goes on. A virtual lid did not do it: UPower takes its lid from gpio-keys, which
+# gts4lv-powerkey grabs, so LidIsClosed never changed (2026-11-09).
+# The config is mutter's temporary kind (method 1): nothing is stored, and a hotplug (undocking) makes
+# mutter pick its own layout again, the panel included. off keeps the layout it found, for on.
+import json
+import os
+import sys
+
+from gi.repository import Gio, GLib
+
+PANEL = "DSI-1"
+SAVE = f"/run/user/{os.getuid()}/gts4lv-panel-layout.json"
+bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+
+
+def call(method, args=None):
+    return bus.call_sync("org.gnome.Mutter.DisplayConfig", "/org/gnome/Mutter/DisplayConfig",
+                         "org.gnome.Mutter.DisplayConfig", method, args, None, Gio.DBusCallFlags.NONE, 5000, None)
+
+
+def state():
+    """serial, the connected connectors with their modes, the layout as [x, y, scale, transform, primary,
+    [[connector, mode id], ...]] per logical monitor."""
+    serial, monitors, logical, _ = call("GetCurrentState").unpack()
+    modes = {spec[0]: m for spec, m, _ in monitors}
+    current = {c: next((mode[0] for mode in m if mode[6].get("is-current")), None) for c, m in modes.items()}
+    layout = [[x, y, scale, transform, primary, [[spec[0], current[spec[0]]] for spec in specs]]
+              for x, y, scale, transform, primary, specs, _ in logical]
+    return serial, modes, layout
+
+
+def apply(serial, layout):
+    lms = [(x, y, scale, transform, primary, [(c, mode, {}) for c, mode in mons])
+           for x, y, scale, transform, primary, mons in layout]
+    call("ApplyMonitorsConfig", GLib.Variant("(uua(iiduba(ssa{sv}))a{sv})", (serial, 1, lms, {})))
+
+
+def has_panel(layout):
+    return any(c == PANEL for lm in layout for c, _ in lm[5])
+
+
+def off():
+    serial, _, layout = state()
+    rest = [lm for lm in layout if not any(c == PANEL for c, _ in lm[5])]
+    if not has_panel(layout):
+        return
+    if not rest:
+        sys.exit("the panel is the only monitor")
+    with open(SAVE, "w") as f:
+        json.dump(layout, f)
+    if not any(lm[4] for lm in rest):
+        rest[0][4] = True
+    apply(serial, rest)
+
+
+def on():
+    serial, modes, layout = state()
+    if has_panel(layout) or PANEL not in modes:
+        return
+    try:
+        saved = json.load(open(SAVE))
+        if all(c in modes for lm in saved for c, _ in lm[5]):
+            apply(serial, saved)
+            return
+    except (OSError, ValueError, GLib.Error) as e:
+        print("saved layout:", e, file=sys.stderr)
+    # No saved layout that fits: the panel to the right of the rest, at 200 %
+    mode = next((m for m in modes[PANEL] if m[6].get("is-preferred")), modes[PANEL][0])
+    right = max((lm[0] + round(m[1] / lm[2]) for lm in layout for c, mid in lm[5]
+                 for m in modes[c] if m[0] == mid), default=0)
+    apply(serial, layout + [[right, 0, 2.0, 0, not layout, [[PANEL, mode[0]]]]])
+
+
+if __name__ == "__main__":
+    {"off": off, "on": on}.get(sys.argv[1] if len(sys.argv) > 1 else "", lambda: sys.exit("usage: gts4lv-panel off|on"))()

@@ -5,6 +5,8 @@ Description=USB OTG: host role and VBUS when the Type-C controller sees an OTG a
 ExecStart=/usr/local/sbin/gts4lv-usb-otgd
 Restart=always
 RestartSec=3
+# journald keeps notice and up only (zz-gts4lv-quiet.conf): the role and charge-rate changes are rare
+SyslogLevel=notice
 
 [Install]
 WantedBy=multi-user.target

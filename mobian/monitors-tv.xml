@@ -1,0 +1,50 @@
+<!-- The login screen (GDM 51's greeter has a fresh home every time, so mutter falls back to this file):
+     docked on the LG TV through the USB-C hub, the TV is primary and gets the login, the tablet's panel
+     sits to its right. Undocked, no configuration here matches and mutter uses the panel alone.
+     The PANEL comes first: mutter 51 hands out primary planes in this order (meta_crtc_kms_assign_extra,
+     first free plane) and never looks at what the kernel has. fbcon boots with the panel on plane-0 and the
+     TV on plane-1; with the TV first mutter asked for the swap in one commit, the core refused it
+     ("switching CRTC directly", EINVAL) and the login was black on both screens (2026-11-09).
+     2026-11-08; monitor ids from org.gnome.Mutter.DisplayConfig.GetCurrentState. -->
+<monitors version="2">
+  <configuration>
+    <layoutmode>logical</layoutmode>
+    <logicalmonitor>
+      <x>2048</x>
+      <y>0</y>
+      <scale>2</scale>
+      <monitor>
+        <monitorspec>
+          <connector>DSI-1</connector>
+          <vendor>unknown</vendor>
+          <product>unknown</product>
+          <serial>unknown</serial>
+        </monitorspec>
+        <mode>
+          <width>2560</width>
+          <height>1600</height>
+          <rate>60.000</rate>
+        </mode>
+      </monitor>
+    </logicalmonitor>
+    <logicalmonitor>
+      <x>0</x>
+      <y>0</y>
+      <scale>2</scale>
+      <primary>yes</primary>
+      <monitor>
+        <monitorspec>
+          <connector>DP-1</connector>
+          <vendor>GSM</vendor>
+          <product>LG TV SSCR2</product>
+          <serial>0x01010101</serial>
+        </monitorspec>
+        <mode>
+          <width>4096</width>
+          <height>2160</height>
+          <rate>30.000</rate>
+        </mode>
+      </monitor>
+    </logicalmonitor>
+  </configuration>
+</monitors>
