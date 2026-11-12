@@ -1,17 +1,36 @@
-Linux 7.2.13 for the Samsung Galaxy Tab S5e (gts4lvwifi, SM-T720)
+Linux 7.2.15 for the Samsung Galaxy Tab S5e (gts4lvwifi, SM-T720)
 ==================================================================
 
 Mainline Linux for the Samsung Galaxy Tab S5e Wi-Fi (SM-T720, codename gts4lvwifi, Snapdragon 670 /
 SDM670). It runs the tablet on **Mobian** (Debian trixie with Mobian's repository) with GNOME and GDM.
 
-The tree is stable **v7.2.13**, plus the SDM670 work of
+The tree is stable **v7.2.15**, plus the SDM670 work of
 [sdm670-mainline/linux](https://gitlab.com/sdm670-mainline/linux) (tag `sdm670-v7.2.3_beta2`, brought up
-to 7.2.13 with the stable incremental patches), plus the tablet changes listed below.
+to 7.2.15 with the stable incremental patches), plus the tablet changes listed below.
+
+7.2.15 is the last 7.2 stable release: kernel.org has marked 7.2 end of life, and this tree stays on it.
+Use the `main` branch.
 
 New in this version
 ===================
 
-* **HDMI out over USB-C, with sound.** The USB-C port's DisplayPort alt mode drives a TV through a
+* **Linux 7.2.15.** 7.2.14 and 7.2.15 change only core code (io_uring, keys, signals and exit, tracing, the
+  scheduler, Bluetooth, SMB, exec), none of the tablet's drivers.
+* **Sleep, continued (November 7 and 8).**
+  * The eMMC controller's bus clock (`sdhci-msm`) was switched on at probe and never off, and through
+    GPLL0 it held the 19.2 MHz crystal in sleep. It now follows the controller's runtime PM.
+  * Blanking powers the panel off (display off, reset, supply off, as downstream does): kept powered, the
+    panel drew about 90 mA more, in suspend too. With the panel off, the tablet drew about 47 mA awake and
+    about 20 mA in s2idle (radios and sensors off as the power key daemon leaves them). "Display on" now
+    goes out a few frames after the panel is enabled, and again until the panel reports it on: sent before
+    the first frame, it was lost, and a cold wake stayed black. **But** on this panel the first picture after
+    such a cold wake still comes up broken (the two halves skewed) or black, so the tablet runs with
+    `panel_samsung_ana38401.keep_power=1` for now (see Display), and asleep it draws about 190 mA, about
+    2.7 % an hour.
+  * Linux's own RPMh sleep votes are clean in s2idle (the crystal, CX, MX and every bus at 0), and the
+    ADSP and the modem sleep the whole time, yet the SoC still never reaches AOSS sleep or CX collapse
+    (`aosd`, `cxsd` stay 0). What holds it is outside those votes and not found yet.
+* November 9: **HDMI out over USB-C, with sound.** The USB-C port's DisplayPort alt mode drives a TV through a
   USB-C-to-HDMI dock: tested on an LG TV through a Parade PS176 dock at 4096x2160 30 Hz and 1920x1080
   120 Hz, and the TV plays the tablet's sound. GDM shows its login on the TV when it is connected at boot,
   the touchscreen can drive the TV, and while docked the power key only switches the panel off and on. See
@@ -23,8 +42,7 @@ New in this version
   the ADSP, and a clock leaked by the touchscreen's I2C bus held the crystal; all three are fixed (see
   Power and reset and Audio). The SM5705 fuel gauge's poll no longer counts as a wakeup event either.
   Before, the battery dropped 2.2-3 % an hour in long sleeps. A first two-hour run with the ADSP fixes
-  lost 2 % in all, and the ADSP now sleeps through the suspend. Whether the SoC reaches its deepest sleep
-  with the crystal fix is being measured.
+  lost 2 % in all, and the ADSP now sleeps through the suspend.
 * Earlier (October 28): sleep works at all (`qcom-wdt`), and boot takes 12 s instead of 27 s (OSM L3
   built in). See Power and reset.
 
@@ -40,23 +58,27 @@ What works
 | Wi-Fi | WCN3990, 2.4 and 5 GHz |
 | Bluetooth | WCN3990 on uart6 |
 | Sound | four CS35L41 speaker amps, both microphones |
-| Battery | SM5705 fuel gauge (new driver), charging |
+| Battery | SM5705 fuel gauge (new driver), charging; the USB daemon sets the charger's input limit from the USB-C current or the PD contract (5 V up to 3 A, or 9 V at 1.65 A, as stock), with a guard on the battery's own thermistor |
 | USB | dual role: device mode (networking, serial) and host mode for OTG devices (see USB below) |
 | Cameras | rear S5K3M5 13 MP and front S5K4HA 8 MP (new driver), through libcamera's software ISP |
 | Video | Venus hardware H.264 and HEVC decode and encode, 1080p60, several sessions at once |
 | Sensors | accelerometer (rotation), magnetometer, ambient light, via the ADSP sensor core and libssc |
 | Cover | hall sensor as a lid switch |
 | Buttons | power (sent as KEY_SCREENLOCK), volume |
-| Suspend | s2idle, woken by the power key or a charger |
+| Suspend | s2idle, woken by the power key; the ADSP and the modem sleep through it |
 
 Not done: rear camera autofocus, the cameras' Samsung colour tuning, the SoC's deepest sleep (in suspend
 the CPUs power down, but the chip does not yet reach AOSS sleep or CX collapse), 24-bit audio playback
-(16-bit only), and USB fast charging. The
+(16-bit only), and a clean picture after the panel was powered off in a blank (see Display). The charger's
+interrupt is not wired up, so plugging in a cable does not wake the tablet. Of the charging cases, 9 V from a
+dock was checked; 5 V at 3 A from a PD charger was not. The
 cameras can stop delivering frames after many starts and stops; that is being looked at. OTG host mode is
 in place but not yet tested with a device. HDMI: only one plug orientation of the USB-C cable has been tried,
 the tested dock needs 24 bits per pixel (`msm.dp_max_bpp=24`, no picture at 30), and unplugging and
 replugging the dock after the panel was switched off can freeze both screens until a reboot (a fix is written,
-not yet tested).
+not yet tested). With the HDMI device in the UCM profile (`mobian/ucm/`) and no TV connected, PipeWire can
+offer no speakers at all, only a dummy output: it checks the profile by preparing every device in it, and
+the DisplayPort back end's prepare fails while nothing is plugged in. A fix is written, not in this tree.
 
 Booting it
 ==========
@@ -98,8 +120,17 @@ Display: Samsung AMSA05RB01 panel behind an Anapass ANA38401 (`panel-samsung-ana
 
 * 2560x1600, two 1280x1600 halves on two DSI links, command mode, continuous HS clock (the TCON runs
   off it; without it frames tear). Samsung addresses DSI0 only, so `qcom,sync-dual-dsi` must stay off.
-* Takes over the panel the bootloader left running (`handover`, default on): a cold start from reset
-  stays black with this DSI host.
+* `handover` (off by default) takes over the panel the bootloader left running at probe instead of starting
+  it from reset; the tablet runs with it on.
+* Blank powers the panel off by default (display off, reset, supply off, as downstream does). `keep_power=1`
+  blanks with display off only and keeps the TCON and panel powered, about 90 mA more, in suspend too.
+  After a power-off, "display on" (29h) goes out from a delayed work 100 ms after enable(), when the first
+  frames have reached the panel, and again (up to 5 times) until its power mode (0Ah) reads display on: sent
+  from enable(), before any frame, it was lost and the panel fell back to black. **Known problem:** even so,
+  the first picture after such a cold wake comes up broken (the two DSI halves skewed by some lines, a
+  touch redraws it) or stays black. The cause is not proven; the commands sent after enable() reach DSI0
+  only and probably delay its frames against DSI1's. The tablet runs with `keep_power=1` until that is
+  solved.
 * Brightness: AID (emission duty) plus a gamma (83h) per luminance step, from Samsung's smart-dimming
   algorithm run offline (`panel-samsung-ana38401-gamma.h`). 83h has to be rewritten before every gamma
   latch. `min_level` sets the lowest level; changes fade over about half a second (`fade`).
@@ -221,6 +252,14 @@ Power and reset
     `pm_runtime_disable` cancelled, and the device was then marked suspended with its clocks on. The
     touchscreen's bus collected nine of them per boot, and through them the crystal stayed on in sleep. A
     failed init now suspends synchronously.
+  * **sdhci-msm**: the eMMC controller's "bus" clock (GCC_AGGRE_UFS_PHY_AXI_CLK on SDM670, fed by GPLL0 and
+    so by the crystal) was switched on at probe and never off, which kept the crystal voted on in the RPMh
+    sleep set. It is now gated with the other clocks in runtime suspend, as downstream gates its
+    "bus_aggr_clk". sdhci-msm is built in.
+  * Measured with these fixes: Linux's RPMh sleep votes are all clean in s2idle (crystal, CX and MX levels
+    and every bus at 0), and the ADSP and the modem sleep through it, yet `aosd` and `cxsd` stay 0: the
+    SoC never reaches AOSS sleep or CX collapse. What holds it lies outside these votes (another RSC, or a
+    PMIC mode) and is not found yet. The panel is the bigger cost meanwhile (see Display).
 * **CPU frequency from the start**: `CONFIG_INTERCONNECT_QCOM_OSM_L3=y`. `qcom-cpufreq-hw` waits for the OSM
   L3 interconnect provider; as a module it came about 10 s into boot, and everything before it ran at the
   bootloader's clock. Boot went from 27 s to 12 s.
@@ -249,7 +288,8 @@ Outside the kernel
 
 The image also needs, in userspace: the touchscreen daemon (it also does double tap to wake), the power key
 daemon (blank and lock, and the sleep policy: two minutes after the screen goes off on battery, not while
-audio plays, Wi-Fi, Bluetooth, the sensor stack and touch off for the sleep), the USB role daemon, LineageOS's firmware (read from the tablet's own partitions at boot), hexagonrpcd and libssc for the
+audio plays, Wi-Fi, Bluetooth, the sensor stack and touch off for the sleep), the USB role daemon (which
+also sets the charge rate), LineageOS's firmware (read from the tablet's own partitions at boot), hexagonrpcd and libssc for the
 sensors, and a patched iio-sensor-proxy (a sensor claimed while it was still being opened never started; the
 light level is smoothed). Also there: Chromium's flags and a Shell extension that opens the on-screen keyboard
 for its text fields, for HDMI the DP alt mode in the USB daemon with its `gts4lv-dp-altmode` module, a GDM
