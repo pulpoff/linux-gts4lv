@@ -29,6 +29,11 @@
 /delete-node/ &ipa_fw_mem;
 /delete-node/ &ipa_gsi_mem;
 /delete-node/ &gpu_mem;
+/*
+ * Back to the kernel (2026-11-09): the SoC's camera region is for the camera ICP firmware, which
+ * nothing here loads.
+ */
+/delete-node/ &camera_mem;
 
 / {
 	model = "Samsung Galaxy Tab S5e (Wi-Fi)";
@@ -187,20 +192,20 @@
 			no-map;
 		};
 
+		/*
+		 * The boot frame simpledrm and U-Boot show: 2560x1600 a8r8g8b8 is 15.6 MiB. Downstream
+		 * reserves 35 MiB here; the rest is the kernel's (2026-11-09).
+		 */
 		cont_splash_mem: framebuffer@9c000000 {
-			reg = <0 0x9c000000 0 0x2300000>;
+			reg = <0 0x9c000000 0 0x1000000>;
 			no-map;
 		};
 
-		dfps_data_mem: dfps-data@9e300000 {
-			reg = <0 0x9e300000 0 0x100000>;
-			no-map;
-		};
-
-		ss_plog_mem: ss-plog@a1100000 {
-			reg = <0 0xa1100000 0 0x200000>;
-			no-map;
-		};
+		/*
+		 * Downstream's dfps-data (1 MiB at 0x9e300000), ss-plog (2 MiB at 0xa1100000), sec-debug
+		 * (8 MiB at 0xa1400000) and its autocomment page (0xa1c00000) are left to the kernel too:
+		 * Samsung's kernel logs, and display data for its panel driver, nothing this kernel reads.
+		 */
 
 		/* Same layout as downstream, so Android can read our panics. */
 		ramoops@a1300000 {
@@ -210,16 +215,6 @@
 			console-size = <0x40000>;
 			ftrace-size = <0x40000>;
 			pmsg-size = <0x40000>;
-		};
-
-		sec_debug_mem: sec-debug@a1400000 {
-			reg = <0 0xa1400000 0 0x800000>;
-			no-map;
-		};
-
-		sec_debug_autocomment_mem: sec-debug-autocomment@a1c00000 {
-			reg = <0 0xa1c00000 0 0x1000>;
-			no-map;
 		};
 
 		tima_mem: tima@b0000000 {
