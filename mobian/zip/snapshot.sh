@@ -22,11 +22,16 @@ mount -o loop,noatime "$IMG" "$M"
 trap 'umount "$M" 2>/dev/null || true' EXIT
 
 echo "== copying from $T"
-${SSHCMD:-ssh} root@$T 'cd / && tar --one-file-system --xattrs --xattrs-include="*" --acls --numeric-owner -cf - \
+# Only the running kernel's modules (the dev tablet keeps the previous trees for rollback), and no
+# system sleep while the copy runs: gts4lv-powerkey honours a logind sleep inhibitor.
+${SSHCMD:-ssh} root@$T 'cd / && X=$(for d in usr/lib/modules/*; do [ "${d##*/}" = "$(uname -r)" ] || echo "--exclude=./$d"; done) &&
+	systemd-inhibit --what=sleep --who=snapshot.sh --why="image snapshot" \
+	tar --one-file-system --xattrs --xattrs-include="*" --acls --numeric-owner -cf - $X \
 	--exclude=./root/* --exclude=./root/.[!.]* --exclude=./home/pulp --exclude=./var/cache/apt/archives/*.deb \
-	--exclude=./var/log/journal/* --exclude=./usr/src/neo --exclude=./opt/chromium-rpt --exclude="./usr/lib/modules/*.old" \
-	--exclude=./usr/lib/modules/7.2.3-gts4lv-g32c6dbf4b6f4-dirty --exclude=./lost+found --exclude=./var/tmp/* \
+	--exclude=./var/log/journal/* --exclude=./usr/src/neo --exclude=./opt/chromium-rpt \
+	--exclude=./lost+found --exclude=./var/tmp/* \
 	--exclude=./swapfile --exclude="./core.*" .' | tar -C "$M" --xattrs --xattrs-include='*' --acls --numeric-owner -xpf - || true
+[ -d "$M/usr/lib/modules/$(${SSHCMD:-ssh} root@$T uname -r)" ] || { echo "the running kernel's modules are missing" >&2; exit 1; }
 [ -x "$M/usr/local/sbin/gts4lv-touchd" ] || { echo "copy failed" >&2; exit 1; }
 
 # The developer's own home is not copied, but two of the shell extensions enabled in dconf-mobian.ini

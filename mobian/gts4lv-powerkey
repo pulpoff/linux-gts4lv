@@ -191,7 +191,8 @@ def touch_lpm(on):
 press_done = 0.0
 
 
-# System sleep (s2idle): once the panel has been off for SLEEP_AFTER s on battery, the radios and the
+# System sleep (s2idle): once the panel has been off for SLEEP_AFTER s on battery and with no display on the DP
+# output, the radios and the
 # ADSP's sensor clients go down, touch stops sensing, and only the power key (or a charger) wakes the
 # tablet. Woken by anything else with the panel still off, it sleeps again after RESLEEP_AFTER s.
 # Not while audio plays or a logind "sleep" block inhibitor is held.
@@ -199,9 +200,9 @@ SLEEP_AFTER = int(os.environ.get("GTS4LV_SLEEP_AFTER", 120))
 RESLEEP_AFTER = int(os.environ.get("GTS4LV_RESLEEP_AFTER", 10))
 SLEEP_ALARM = int(os.environ.get("GTS4LV_SLEEP_ALARM", 0))	# testing: an RTC wake after this many s
 SLEEP_ON_CHARGER = os.environ.get("GTS4LV_SLEEP_ON_CHARGER") == "1"	# testing over USB
-# On the charger it stays up until the battery has this much, then sleeps like on battery (the charger
-# goes on charging through the sleep). The owner's rule: charge first, then sleep.
-CHARGE_TO = int(os.environ.get("GTS4LV_CHARGE_TO", 90))
+# On the charger it stays up, however full (owner, 2026-11-09: "stay awake when on charge"; until then it slept
+# from 90 %, the earlier rule "charge first, then sleep"). So does it with a display on the DP output, connected
+# whether or not mutter has it on (the TV off, no session): "or when hdmi is connected".
 off_since = None	# monotonic time the panel went off; None while it is on
 lid_since = None	# monotonic time the cover closed; None while it is open
 CHARGER = "/sys/class/power_supply/sm5705-charger/online"
@@ -228,6 +229,16 @@ def docked():
         try:
             if (open(c + "/status").read().strip() == "connected"
                     and open(c + "/enabled").read().strip() == "enabled"):
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def display_connected():
+    for c in glob.glob("/sys/class/drm/card*-DP-*"):
+        try:
+            if open(c + "/status").read().strip() == "connected":
                 return True
         except OSError:
             pass
@@ -265,16 +276,25 @@ def read_int(path, default=0):
         return default
 
 
-def pwrkey_irqs():
-    """The power key's interrupt count: its wakeup_count never moves (pm8941-pwrkey reports no
-    wakeup event), the interrupt does, once per press and once per release."""
+def irq_count(name):
+    """An interrupt's count, by its action name. The power key's wakeup_count never moves
+    (pm8941-pwrkey reports no wakeup event), the interrupt does, once per press and once per release."""
     try:
         for line in open("/proc/interrupts"):
-            if line.rstrip().endswith("pm8941_pwrkey"):
+            if line.rstrip().endswith(name):
                 return sum(int(f) for f in line.split()[1:] if f.isdigit())
     except OSError:
         pass
     return 0
+
+
+def pwrkey_irqs():
+    return irq_count("pm8941_pwrkey")
+
+
+def cable_irqs():
+    """The charger's nINT (sm5705_battery, VBUS in or out): a cable plugged in wakes the tablet."""
+    return irq_count("sm5705-charger")
 
 
 def audio_playing():
@@ -361,7 +381,8 @@ def charge_base():
 
 
 def system_sleep():
-    """Radios and sensors down, s2idle, back up. True when the power key woke it."""
+    """Radios and sensors down, s2idle, back up. "key" when the power key woke it, "cable" when a cable
+    plugged in did, else None."""
     open(CHARGE_HOLD, "w").close()
     hold_since = time.monotonic()
     blocked = []
@@ -382,16 +403,18 @@ def system_sleep():
             log("wakealarm:", e)
     time.sleep(max(0, hold_since + 1.5 - time.monotonic()))
     charge_base()
-    keys = pwrkey_irqs()
+    keys, cables = pwrkey_irqs(), cable_irqs()
     log("sleeping; battery", battery(), "radios off:", [os.path.basename(d) for d in blocked])
     slept = time.time()
     try:
         open("/sys/power/state", "w").write("mem")
     except OSError as e:
         log("suspend failed:", e)
-    by_key = pwrkey_irqs() > keys
-    log("resumed after %d s" % (time.time() - slept), "by the power key" if by_key else "by something else",
-        "battery", battery())
+    # The charger's interrupt is handled once the system is back up: a moment for it.
+    time.sleep(0.2)
+    woke = "key" if pwrkey_irqs() > keys else "cable" if cable_irqs() > cables else None
+    log("resumed after %d s" % (time.time() - slept),
+        {"key": "by the power key", "cable": "by a cable"}.get(woke, "by something else"), "battery", battery())
     try:
         os.unlink(CHARGE_HOLD)
     except OSError:
@@ -403,7 +426,7 @@ def system_sleep():
             open(d + "/soft", "w").write("0")
         except OSError:
             pass
-    return by_key
+    return woke
 
 
 def sleeper():
@@ -419,13 +442,14 @@ def sleeper():
             with busy:
                 dock_panel(False)
             why = "undocked with the panel off"
+        elif display_connected():
+            why = "a display on the DP output"
         elif since is None:
             why = "panel on"
         elif time.monotonic() - since < SLEEP_AFTER:
             why = "panel off < %d s" % SLEEP_AFTER
-        elif (on_charger() and not SLEEP_ON_CHARGER
-              and read_int("/sys/class/power_supply/sm5705-battery/capacity") < CHARGE_TO):
-            why = "on the charger, below %d %%" % CHARGE_TO
+        elif on_charger() and not SLEEP_ON_CHARGER:
+            why = "on the charger"
         elif audio_playing():
             why = "audio playing"
         elif sleep_blocked():
@@ -444,7 +468,8 @@ def sleeper():
             woke = system_sleep()
             if woke:
                 # The press that woke it is often gone by the time the driver reads the key, and when
-                # it is not, it must not toggle the panel straight back off.
+                # it is not, it must not toggle the panel straight back off. A cable plugged in lights
+                # the lock screen too, as on Android; on the charger it then stays up.
                 _pressed(False)
                 press_done = time.time() + 0.5
             if off_since is not None:

@@ -2,6 +2,10 @@
 Description=Tablet's own Wi-Fi MAC for NetworkManager (from EFS)
 Before=NetworkManager.service
 After=local-fs.target
+# and after the EFS partition's link: with local-fs alone it ran before udev had made it (2026-11-09, a
+# faster kernel), wrote nothing, and NetworkManager came up with ath10k's random MAC and a new lease
+Wants=dev-disk-by\x2dpartlabel-efs.device
+After=dev-disk-by\x2dpartlabel-efs.device
 
 [Service]
 Type=oneshot
