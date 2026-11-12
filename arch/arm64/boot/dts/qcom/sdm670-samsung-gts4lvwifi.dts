@@ -484,11 +484,12 @@
 };
 
 /*
- * POGO keyboard (stm32-pogo-kbd, nodes at the end of this file). Off until it
- * has been tested on the tablet, so the default DTB stays as it was: uncomment
- * this, or build the DTB with -DGTS4LV_POGO_KEYBOARD.
+ * POGO keyboard (stm32-pogo-kbd, nodes at the end of this file). On since the
+ * 2026-11-12 build: comment this out for a DTB without it. The driver needs
+ * Samsung's FPGA bitstream, samsung/gts4lv/pogo_fpga.fw, which the images copy
+ * out of the tablet's own LineageOS kernel on the first boot.
  */
-/* #define GTS4LV_POGO_KEYBOARD */
+#define GTS4LV_POGO_KEYBOARD
 
 /*
  * Secure-world GPIOs on SDM670 phones; touching them resets the SoC. That is
