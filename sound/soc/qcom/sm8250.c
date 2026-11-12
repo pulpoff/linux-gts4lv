@@ -26,8 +26,76 @@ struct sm8250_snd_data {
 	struct snd_soc_jack usb_offload_jack;
 	bool usb_offload_jack_setup;
 	struct snd_soc_jack dp_jack;
+	bool dp_idle;
 	bool jack_setup;
 };
+
+/*
+ * DP with no display attached: its back end must still prepare. PipeWire probes a UCM profile by
+ * opening (hw_params, which prepares) every device in it, and one failure dropped the whole HiFi
+ * profile, the speakers with it, whenever the session started without the TV (11-10). Both DAI
+ * prepares fail then: q6afe's AFE start (the ADSP holds it until the DP audio engine runs, see
+ * sm8250_snd_prepare) and hdmi-codec's (msm_dp_audio_prepare, -EINVAL while the DP link is off).
+ * So while the link prepare finds the jack out, both are skipped: their DAI ops are wrapped once at
+ * init and restored at exit. A stream here plays into nothing; WirePlumber does not pick a sink
+ * whose jack is out.
+ */
+static struct snd_soc_dai_ops sm8250_dp_cpu_ops, sm8250_dp_codec_ops;
+static const struct snd_soc_dai_ops *sm8250_dp_cpu_orig, *sm8250_dp_codec_orig;
+static struct snd_soc_dai *sm8250_dp_cpu_dai, *sm8250_dp_codec_dai;
+
+static bool sm8250_dp_idle(struct snd_pcm_substream *substream)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct sm8250_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
+
+	return data->dp_idle;
+}
+
+static int sm8250_dp_cpu_prepare(struct snd_pcm_substream *substream, struct snd_soc_dai *dai)
+{
+	if (sm8250_dp_idle(substream) || !sm8250_dp_cpu_orig->prepare)
+		return 0;
+	return sm8250_dp_cpu_orig->prepare(substream, dai);
+}
+
+static int sm8250_dp_codec_prepare(struct snd_pcm_substream *substream, struct snd_soc_dai *dai)
+{
+	if (sm8250_dp_idle(substream) || !sm8250_dp_codec_orig->prepare)
+		return 0;
+	return sm8250_dp_codec_orig->prepare(substream, dai);
+}
+
+static void sm8250_dp_wrap(struct snd_soc_pcm_runtime *rtd)
+{
+	struct snd_soc_dai *cpu = snd_soc_rtd_to_cpu(rtd, 0);
+	struct snd_soc_dai *codec = snd_soc_rtd_to_codec(rtd, 0);
+
+	if (sm8250_dp_cpu_dai || !cpu->driver->ops || !codec->driver->ops)
+		return;
+
+	sm8250_dp_cpu_orig = cpu->driver->ops;
+	sm8250_dp_cpu_ops = *sm8250_dp_cpu_orig;
+	sm8250_dp_cpu_ops.prepare = sm8250_dp_cpu_prepare;
+	sm8250_dp_codec_orig = codec->driver->ops;
+	sm8250_dp_codec_ops = *sm8250_dp_codec_orig;
+	sm8250_dp_codec_ops.prepare = sm8250_dp_codec_prepare;
+
+	cpu->driver->ops = &sm8250_dp_cpu_ops;
+	codec->driver->ops = &sm8250_dp_codec_ops;
+	sm8250_dp_cpu_dai = cpu;
+	sm8250_dp_codec_dai = codec;
+}
+
+static void sm8250_dp_unwrap(void)
+{
+	if (!sm8250_dp_cpu_dai)
+		return;
+	sm8250_dp_cpu_dai->driver->ops = sm8250_dp_cpu_orig;
+	sm8250_dp_codec_dai->driver->ops = sm8250_dp_codec_orig;
+	sm8250_dp_cpu_dai = NULL;
+	sm8250_dp_codec_dai = NULL;
+}
 
 static int sm8250_snd_init(struct snd_soc_pcm_runtime *rtd)
 {
@@ -35,8 +103,13 @@ static int sm8250_snd_init(struct snd_soc_pcm_runtime *rtd)
 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 
 	switch (cpu_dai->id) {
-	case DISPLAY_PORT_RX:
-		return qcom_snd_dp_jack_setup(rtd, &data->dp_jack, 0);
+	case DISPLAY_PORT_RX: {
+		int ret = qcom_snd_dp_jack_setup(rtd, &data->dp_jack, 0);
+
+		if (!ret)
+			sm8250_dp_wrap(rtd);
+		return ret;
+	}
 	case USB_RX:
 		return qcom_snd_usb_offload_jack_setup(rtd, &data->usb_offload_jack,
 						       &data->usb_offload_jack_setup);
@@ -53,6 +126,8 @@ static void sm8250_snd_exit(struct snd_soc_pcm_runtime *rtd)
 	if (cpu_dai->id == USB_RX)
 		qcom_snd_usb_offload_jack_remove(rtd,
 						 &data->usb_offload_jack_setup);
+	if (cpu_dai->id == DISPLAY_PORT_RX)
+		sm8250_dp_unwrap();
 
 }
 
@@ -301,6 +376,11 @@ static int sm8250_snd_prepare(struct snd_pcm_substream *substream)
 	 */
 	if (cpu_dai->id == DISPLAY_PORT_RX) {
 		struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(rtd, 0);
+
+		/* no display on the DP output: nothing to start, and both DAI prepares skip (sm8250_dp_wrap) */
+		data->dp_idle = !(data->dp_jack.status & SND_JACK_AVOUT);
+		if (data->dp_idle)
+			return 0;
 
 		if (codec_dai->driver->ops && codec_dai->driver->ops->prepare) {
 			int ret = codec_dai->driver->ops->prepare(substream, codec_dai);
