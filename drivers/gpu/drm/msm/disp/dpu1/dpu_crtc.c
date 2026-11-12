@@ -1455,6 +1455,7 @@ static int dpu_crtc_assign_resources(struct drm_crtc *crtc,
 		return 0;
 
 	topology = dpu_crtc_get_topology(crtc, dpu_kms, crtc_state);
+	to_dpu_crtc_state(crtc_state)->dspp_wanted = topology.num_dspp;
 	ret = dpu_rm_reserve(&dpu_kms->rm, global_state,
 			     crtc_state->crtc, &topology);
 	if (ret && topology.num_dspp) {
@@ -1532,6 +1533,16 @@ int dpu_crtc_check_mode_changed(struct drm_crtc_state *old_crtc_state,
 	    (!clone_mode_requested && clone_mode_enabled))
 		new_crtc_state->mode_changed = true;
 
+	/*
+	 * gts4lv: CTM/gamma appearing or going away changes the DSPP reservation, which can move the
+	 * CRTC to other mixers: that has to be a modeset, so that the encoder takes the new mixers'
+	 * pingpongs along (dpu_encoder_virt_atomic_mode_set). A new LUT alone keeps the mixers.
+	 */
+	if (new_crtc_state->enable && new_crtc_state->color_mgmt_changed &&
+	    !!(new_crtc_state->ctm || new_crtc_state->gamma_lut) !=
+	    to_dpu_crtc_state(old_crtc_state)->dspp_wanted)
+		new_crtc_state->mode_changed = true;
+
 	return 0;
 }
 
@@ -1550,9 +1561,13 @@ static int dpu_crtc_atomic_check(struct drm_crtc *crtc,
 
 	bool needs_dirtyfb = dpu_crtc_needs_dirtyfb(crtc_state);
 
-	/* don't reallocate resources if only ACTIVE has beeen changed */
-	if (crtc_state->mode_changed || crtc_state->connectors_changed ||
-	    crtc_state->color_mgmt_changed) {
+	/*
+	 * don't reallocate resources if only ACTIVE has beeen changed. gts4lv: nor for a new
+	 * CTM/gamma alone (see dpu_crtc_check_mode_changed). Reserving again then could hand the
+	 * CRTC other mixers than its encoder's pingpongs, which only a modeset re-reads: the panel
+	 * waited on PP_2/PP_3 while LM_0/LM_1 fed PP_0/PP_1, kickoff timeouts (2026-11-09).
+	 */
+	if (crtc_state->mode_changed || crtc_state->connectors_changed) {
 		rc = dpu_crtc_assign_resources(crtc, crtc_state);
 		if (rc < 0)
 			return rc;

@@ -223,6 +223,9 @@ struct dpu_crtc_state {
 	u32 num_ctls;
 	struct dpu_hw_ctl *hw_ctls[CRTC_DUAL_MIXERS];
 
+	/* gts4lv: the last reservation asked for DSPPs (CTM or gamma), granted or not */
+	bool dspp_wanted;
+
 	enum dpu_crtc_crc_source crc_source;
 	int crc_frame_skip_count;
 };
