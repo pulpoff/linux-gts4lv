@@ -124,6 +124,10 @@
 		charger@49 {
 			compatible = "siliconmitus,sm5705-charger";
 			reg = <0x49>;
+			/* nINT: a cable plugged in (VBUS) wakes the system */
+			interrupts-extended = <&tlmm 22 IRQ_TYPE_LEVEL_LOW>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&charger_int_default>;
 		};
 	};
 
@@ -498,6 +502,14 @@
 #else
 	gpio-reserved-ranges = <0 4>, <81 4>;
 #endif
+
+	/* the charger's open-drain nINT has its own pull-up; the reset pull-down held it low */
+	charger_int_default: charger-int-state {
+		pins = "gpio22";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
 
 	hall_default: hall-state {
 		pins = "gpio124";
