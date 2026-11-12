@@ -14,6 +14,28 @@ Use the `main` branch.
 New in this version
 ===================
 
+November 12:
+
+* **The Book Cover Keyboard is on.** Its device tree nodes are now in the DTB by default, and gpio0-2 are
+  no longer reserved (Samsung's kernel drives them on this tablet for the keyboard). The keyboard sits
+  behind a Lattice FPGA whose bitstream is Samsung's and is not in this tree: the driver asks for
+  `samsung/gts4lv/pogo_fpga.fw`, and the image copies it at boot from the LineageOS recovery already on
+  the tablet. Not yet tried with a keyboard on a tablet.
+* **Replugging HDMI no longer freezes both screens** (written for the freeze after a docked panel-off,
+  undock and redock): the display engine reserves its mixers again only on a modeset, not whenever a gamma
+  or colour matrix changes. Not yet tested on the tablet. See Display: DisplayPort over USB-C.
+* **The speakers work with no TV connected.** With the HDMI device in the UCM profile, PipeWire dropped the
+  whole profile, speakers included, whenever a session started without a TV. On the tablet since
+  November 10. See Audio.
+* **Plugging in or pulling out a cable wakes the tablet** and changes the charging state at once, not at the
+  next 30 s poll: the SM5705 charger's interrupt is wired up. The interrupt itself has run on the tablet
+  since November 10; a wake from sleep by the cable is not verified yet. See Power and reset.
+* **About 35 MiB more memory.** Carve-outs for Samsung's splash, logs and panel driver, and the camera
+  ICP firmware, which nothing in this kernel reads, are given back. On the tablet since November 9. See
+  Device tree.
+
+The previous update (Linux 7.2.15, the eMMC bus clock, the panel's power in sleep) is commit ed62044b5:
+
 * **Linux 7.2.15.** 7.2.14 and 7.2.15 change only core code (io_uring, keys, signals and exit, tracing, the
   scheduler, Bluetooth, SMB, exec), none of the tablet's drivers.
 * **Sleep, continued (November 7 and 8).**
@@ -35,8 +57,8 @@ New in this version
   120 Hz, and the TV plays the tablet's sound. GDM shows its login on the TV when it is connected at boot,
   the touchscreen can drive the TV, and while docked the power key only switches the panel off and on. See
   Display: DisplayPort over USB-C, and Audio.
-* **Book Cover Keyboard driver** (`stm32-pogo-kbd`, new), not yet tested on the tablet: its device tree
-  nodes stay out of the DTB unless it is built with `-DGTS4LV_POGO_KEYBOARD`.
+* **Book Cover Keyboard driver** (`stm32-pogo-kbd`, new). Its device tree nodes then stayed out of the DTB
+  unless it was built with `-DGTS4LV_POGO_KEYBOARD`; they are on since November 12.
 * Earlier (November 6): **sleep costs less.** Asleep, the tablet drew 220-250 mA: the ADSP never power-collapsed, and
   the SoC's 19.2 MHz crystal never stopped. The digital codec's MCLK and the speaker link's bit clock held
   the ADSP, and a clock leaked by the touchscreen's I2C bus held the crystal; all three are fixed (see
@@ -69,16 +91,14 @@ What works
 
 Not done: rear camera autofocus, the cameras' Samsung colour tuning, the SoC's deepest sleep (in suspend
 the CPUs power down, but the chip does not yet reach AOSS sleep or CX collapse), 24-bit audio playback
-(16-bit only), and a clean picture after the panel was powered off in a blank (see Display). The charger's
-interrupt is not wired up, so plugging in a cable does not wake the tablet. Of the charging cases, 9 V from a
-dock was checked; 5 V at 3 A from a PD charger was not. The
+(16-bit only), and a clean picture after the panel was powered off in a blank (see Display). A cable
+plugged in while the tablet sleeps should now wake it; that is not verified yet. Of the charging cases, 9 V
+from a dock was checked; 5 V at 3 A from a PD charger was not. The
 cameras can stop delivering frames after many starts and stops; that is being looked at. OTG host mode is
-in place but not yet tested with a device. HDMI: only one plug orientation of the USB-C cable has been tried,
-the tested dock needs 24 bits per pixel (`msm.dp_max_bpp=24`, no picture at 30), and unplugging and
-replugging the dock after the panel was switched off can freeze both screens until a reboot (a fix is written,
-not yet tested). With the HDMI device in the UCM profile (`mobian/ucm/`) and no TV connected, PipeWire can
-offer no speakers at all, only a dummy output: it checks the profile by preparing every device in it, and
-the DisplayPort back end's prepare fails while nothing is plugged in. A fix is written, not in this tree.
+in place but not yet tested with a device. The Book Cover Keyboard has not been tried on a tablet yet. HDMI:
+only one plug orientation of the USB-C cable has been tried, the tested dock needs 24 bits per pixel
+(`msm.dp_max_bpp=24`, no picture at 30), and the fix for both screens freezing when the dock was unplugged
+and plugged in again after the panel was switched off is in this tree but not yet tested on the tablet.
 
 Booting it
 ==========
@@ -113,7 +133,18 @@ Device tree
   without L18. Note for anyone copying the voltages: PM660 PLDOs step 8 mV from 1.664 V; a value that is
   not a step (2.95 V) fails the whole regulator node, eMMC I/O rail included.
 * **Protected clocks** (GCC_QSPI_*): touching them resets the SoC within a second of boot.
-* **Reserved GPIOs** 0-3 and 81-84 (secure world).
+* **Reserved GPIOs** 3 and 81-84 (secure world). gpio0-2 were reserved too until the keyboard needed them
+  (below).
+* **Memory carve-outs given back.** Samsung's kernel reserves 35 MiB at 0x9c000000 for its splash, plus
+  regions for its own logs and panel driver (dfps-data, ss-plog, sec-debug and its autocomment page);
+  `sdm670.dtsi` reserves 5 MiB for the camera ICP firmware. Nothing in this kernel reads any of them. The
+  framebuffer region keeps the 16 MiB the boot frame needs (2560x1600 at 4 bytes a pixel); about 35 MiB
+  goes back to the kernel.
+* **Charger interrupt.** The SM5705 charger's nINT is TLMM gpio22: open drain, active low, with its own
+  pull-up. The TLMM comes out of reset with a pull-down on that pin, which holds it low (a storm of level
+  interrupts), so the pin state sets bias-disable, as Samsung's kernel does.
+* **Book Cover Keyboard (EJ-FT720)**: the keyboard's MCU on QUP0 SE0 I2C, its Lattice FPGA bridge on QUP1
+  SE0 SPI, and their supplies and pins.
 
 Display: Samsung AMSA05RB01 panel behind an Anapass ANA38401 (`panel-samsung-ana38401`, new)
 --------------------------------------------------------------------------------------------
@@ -173,6 +204,23 @@ Display: DisplayPort over USB-C
   * A CRTC reserved without DSPPs no longer keeps the DSPP pointers of its previous state (the state is a
     copy), and no longer frees DSPP_0 from the CRTC that owns it. Both made the panel and the TV program the
     same DSPP after a replug.
+  * **Reserve again only on a modeset.** `dpu_crtc_atomic_check()` reserved the CRTC's resources again
+    whenever its colour management changed, without a modeset, so a gamma ramp or colour matrix appearing or
+    going away could move the CRTC to other mixers, while the encoder takes the pingpongs of its mixers only
+    at a modeset. After a docked panel-off, undock and redock, the panel waited on PP_2/PP_3 while LM_0/LM_1
+    fed PP_0/PP_1: kickoff and vblank timeouts on both screens until a reboot. A gamma or colour matrix
+    turning on or off is now a modeset (the CRTC state remembers whether its last reservation asked for
+    DSPPs); a new LUT alone keeps the mixers. Not yet tested on the tablet.
+
+Input: the Book Cover Keyboard (`stm32-pogo-kbd`, new)
+-----------------------------------------------------
+
+* A port of Samsung's `stm32_pogo_keyboard` and `pogo_fpga_dev` for the Book Cover Keyboard (EJ-FT720),
+  without sec_class, wakelocks, the MUIC notifier chain or the keyboard's firmware update. The keyboard's
+  STM32 sits at I2C 0x2a behind a Lattice iCE5LP4K on the tablet, which is SRAM based: the driver loads
+  Samsung's bitstream (`samsung/gts4lv/pogo_fpga.fw`) over SPI at every boot. Attach detection reads the
+  SM5705 MUIC's ADC (the keyboard reads as 49.9 kOhm), since mainline has no driver for that MUIC.
+* Not yet tried with a keyboard on a tablet.
 
 Cameras
 -------
@@ -198,6 +246,13 @@ Audio
   prepares the CPU DAI (the AFE port) before the codec DAI (`hdmi-codec`, which starts the engine) and shuts
   the codec DAI down first, so both commands timed out (-110) and the port stayed started. The link's
   prepare now starts the engine first, and its hw_free stops the port while the engine still runs.
+* **sm8250, DisplayPort with no display.** PipeWire checks a UCM profile by preparing every device in it,
+  and one failure marks the whole profile unsupported. With nothing on the DisplayPort output both DAI
+  prepares of its back end fail (the ADSP holds the AFE start until the DP audio engine runs, and
+  `hdmi-codec`'s prepare returns -EINVAL while the link is off), so the HiFi profile, and the speakers with
+  it, was dropped whenever a session started without a TV. While the DP jack is out, the link's CPU and
+  codec DAI prepares now return 0; a stream then plays into nothing, and WirePlumber does not pick a sink
+  whose jack is out.
 * **sm8250**: a back-end shutdown that sets the bit clock its startup turned on back to 0. That clock is an
   AFE vote in the ADSP, and after the first stream it kept the ADSP awake for good.
 
@@ -230,13 +285,19 @@ Video: Venus
 Power and reset
 ---------------
 
-* **SM5705 fuel gauge and charger status** (`drivers/power/supply/sm5705_battery.c`, new, read-only):
+* **SM5705 fuel gauge and charger status** (`drivers/power/supply/sm5705_battery.c`, new):
   capacity, voltage, current, charging state, and charge, energy and power (`charge_now` from the gauge's
   1/256 % state of charge; energy at the battery's nominal 3.85 V, 27.1 Wh), which UPower needs for the
-  discharge rate and GNOME's "time remaining". The chips charge on their own. Its 30 s poll is not a
-  wakeup source and is frozen across system sleep: each one ended an s2idle. `charge_now` follows the
-  gauge's model, not a coulomb counter: after unplugging it can hold still for most of an hour and then
-  catch up.
+  discharge rate and GNOME's "time remaining". The chips charge on their own; the driver writes only the
+  charger's interrupt masks. Its 30 s poll is not a wakeup source and is frozen across system sleep: each
+  one ended an s2idle. `charge_now` follows the gauge's model, not a coulomb counter: after unplugging it
+  can hold still for most of an hour and then catch up.
+  * **Cable wake.** Only VBUSPOK and VBUSUVLO are unmasked, a threaded handler reads INT1 to INT4 (they
+    clear on read), and the interrupt is a wake IRQ: a cable plugged in or pulled out wakes the system and
+    changes the online state at once. The interrupt comes from the DT (gpio22, see Device tree), or, for a
+    DT without it, from the `chg_int_line` module parameter (`<gpiochip label>:<line>`), with the pin bias
+    set through a node-less faux device. A line still low with nothing latched is refused. Without an
+    interrupt the poll is all there is, as before.
 * **Suspend** (s2idle; the SoC offers no deeper state to Linux):
   * **qcom-wdt** stops the watchdog for suspend, and starts it again on resume, whenever it runs, not only
     when userspace opened it. The bootloader leaves it running, the watchdog core pings it from a kernel
@@ -287,8 +348,10 @@ Outside the kernel
 ==================
 
 The image also needs, in userspace: the touchscreen daemon (it also does double tap to wake), the power key
-daemon (blank and lock, and the sleep policy: two minutes after the screen goes off on battery, not while
-audio plays, Wi-Fi, Bluetooth, the sensor stack and touch off for the sleep), the USB role daemon (which
+daemon (blank and lock, and the sleep policy: two minutes after the screen goes off, on battery and with no
+display on the DP output, not while audio plays, Wi-Fi, Bluetooth, the sensor stack and touch off for the
+sleep; on the charger it stays awake), the image's `gts4lv-pogo-fw` (it copies the keyboard's FPGA bitstream
+from the LineageOS recovery on the tablet at boot), the USB role daemon (which
 also sets the charge rate), LineageOS's firmware (read from the tablet's own partitions at boot), hexagonrpcd and libssc for the
 sensors, and a patched iio-sensor-proxy (a sensor claimed while it was still being opened never started; the
 light level is smoothed). Also there: Chromium's flags and a Shell extension that opens the on-screen keyboard
